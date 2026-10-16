@@ -102,6 +102,7 @@ export const CHANGE_SOURCE_LABELS: Record<import('./types.ts').ChangeSource, str
   WORK_PACKAGE: 'Arbeitspaket',
   EMAIL: 'E-Mail-Eingang',
   BUILDFLOW_SYNC: 'BuildFlow-Abgleich',
+  KLIM_SYNC: 'KLIM-Tafel-Abgleich',
   FUTURE_AI: 'KI (Jarvis)',
 }
 
@@ -130,6 +131,7 @@ export const PROPOSAL_ORIGIN_LABELS: Record<import('./types.ts').ProposalOrigin,
   manual: 'Manuell',
   email: 'E-Mail',
   buildflow: 'BuildFlow',
+  klim: 'KLIM-Tafel',
   ai: 'KI',
 }
 

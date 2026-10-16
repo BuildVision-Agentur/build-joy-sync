@@ -29,17 +29,39 @@ import type { OrgRole, Session, Task } from '../shared/types.ts'
 export const DEMO_PASSWORD = 'demo1234'
 export const DEMO_SHARE_TOKEN = 'demo-fliesen-rossi'
 
+/** Einfache Prüfsumme (djb2) über den Vorlageninhalt - genügt, um Änderungen zu erkennen */
+function inhaltsHash(text: string): string {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0
+  return `${text.length}-${(h >>> 0).toString(36)}`
+}
+
 export async function seedBuiltinTemplates(db: Db): Promise<void> {
   for (const tpl of BUILTIN_TEMPLATES) {
-    const exists = await db.get('SELECT id FROM project_templates WHERE id = ?', tpl.id)
-    if (exists) continue
-    await db.transaction(async () => {
-      await db.insert('project_templates', {
-        id: tpl.id, org_id: null, name: tpl.name, description: tpl.description, planning_kind: tpl.planning_kind, project_type: tpl.project_type,
-        construction_method: tpl.construction_method, is_builtin: true, created_at: nowISO(),
-      })
-      for (const tt of builtinToTemplateTasks(tpl)) await db.insert('template_tasks', tt)
-    })
+    const exists = await db.get<{ id: string; content_hash: string | null }>('SELECT id, content_hash FROM project_templates WHERE id = ?', tpl.id)
+    if (exists && !tpl.refresh) continue
+    const tasks = builtinToTemplateTasks(tpl)
+    // Datengetriebene Vorlage (z. B. KLIM-Tafel): nur neu einspielen, wenn sich der Inhalt geändert hat; bestehende Projekte bleiben unberührt
+    const hash = tpl.refresh ? inhaltsHash(JSON.stringify([tpl.name, tpl.description, tasks])) : null
+    if (exists && hash && exists.content_hash === hash) continue
+    try {
+      if (exists) {
+        await db.update('project_templates', tpl.id, { name: tpl.name, description: tpl.description, planning_kind: tpl.planning_kind, content_hash: null })
+        await db.run('DELETE FROM template_tasks WHERE template_id = ?', tpl.id)
+      } else {
+        await db.insert('project_templates', {
+          id: tpl.id, org_id: null, name: tpl.name, description: tpl.description, planning_kind: tpl.planning_kind, project_type: tpl.project_type,
+          construction_method: tpl.construction_method, is_builtin: true, created_at: nowISO(),
+        })
+      }
+      // Große Vorlagen (KLIM: über 1.800 Zeilen) in Paketen schreiben statt Zeile für Zeile
+      for (let i = 0; i < tasks.length; i += 50) await db.batch(tasks.slice(i, i + 50).map((tt) => buildInsert('template_tasks', tt)))
+      if (hash) await db.update('project_templates', tpl.id, { content_hash: hash })
+    } catch (e) {
+      // Eine fehlgeschlagene KLIM-Einspielung darf den Start der App nicht verhindern; beim nächsten Start wird sie wiederholt
+      if (!tpl.refresh) throw e
+      console.error(`Vorlage ${tpl.id} konnte nicht eingespielt werden:`, e)
+    }
   }
   for (const wp of BUILTIN_WORK_PACKAGES) {
     if (await db.get('SELECT id FROM work_package_templates WHERE id = ?', wp.id)) continue

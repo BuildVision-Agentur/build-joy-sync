@@ -9,6 +9,8 @@
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
+    "docs:klim": "node scripts/klim-docs.ts",
+    "klim:tafel": "node scripts/klim-tafel-import.ts",
     "format": "prettier --write ."
   },
   "overrides": {

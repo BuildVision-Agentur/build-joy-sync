@@ -10,8 +10,12 @@ import type { ConstructionMethod, DependencyType, PlanningKind, ProjectType, Tas
 import { DHH_MASSIV_V1 } from './dhh.ts'
 import { FREIER_PLAN, GESAMTPROJEKT, PROJEKTENTWICKLUNG } from './general.ts'
 import { COACHING_PROGRAMM, INTERN_AUFGABEN, SOFTWARE_PROJEKT } from './internal.ts'
+import { KLIM_TEMPLATES } from './klim.ts'
 
-type Row = [key: string, parent: string | null, name: string, type: TaskType, duration: number, trade: string | null, deps?: string, section?: string | null, constraints?: TemplateConstraint[]]
+/** Stand eines Vorgangs beim Anlegen (z. B. aus der KLIM-Tafel): erledigt oder begonnen, mit Ist-Datum */
+export interface RowStand { status: 'done' | 'in_progress'; progress: number; datum: string }
+
+export type Row = [key: string, parent: string | null, name: string, type: TaskType, duration: number, trade: string | null, deps?: string, section?: string | null, constraints?: TemplateConstraint[], notes?: string, stand?: RowStand]
 
 export interface BuiltinTemplate {
   id: string
@@ -21,6 +25,8 @@ export interface BuiltinTemplate {
   project_type: ProjectType | null
   construction_method: ConstructionMethod | null
   rows: Row[]
+  /** Bei jedem Start neu einspielen (Inhalt kommt aus Daten, die sich ändern, z. B. KLIM-Tafel) */
+  refresh?: boolean
 }
 
 export function parseDeps(spec: string | undefined): TemplateDependency[] {
@@ -171,4 +177,5 @@ export const BUILTIN_TEMPLATES: BuiltinTemplate[] = [
   { id: 'tpl_dhh_massiv', name: 'DHH Massiv', description: 'Doppelhaushälfte massiv mit Keller inkl. Lüftungsanlage – Rohbau je Geschoss mit Decken-Arbeitsschritten, Gewerke mehrfach im Ablauf, Voraussetzungen.', planning_kind: 'construction', project_type: 'dhh', construction_method: 'massiv', rows: DHH_MASSIV },
   { id: 'tpl_whg_kern', name: 'Wohnung Kernsanierung', description: 'Komplette Kernsanierung einer Wohnung im Bestand, ca. 10–12 Wochen.', planning_kind: 'construction', project_type: 'wohnung_sanierung', construction_method: 'individuell', rows: WOHNUNG_KERN },
   { id: 'tpl_haus_kern', name: 'Haus Kernsanierung', description: 'Energetische Kernsanierung eines Bestandshauses inkl. Dach, Fassade und Haustechnik.', planning_kind: 'construction', project_type: 'haus_sanierung', construction_method: 'individuell', rows: HAUS_KERN },
+  ...KLIM_TEMPLATES,
 ]

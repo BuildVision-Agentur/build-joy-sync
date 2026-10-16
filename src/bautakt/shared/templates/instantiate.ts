@@ -148,7 +148,17 @@ export function builtinToTemplateTasks(tpl: BuiltinTemplate): TemplateTask[] {
     sort_order: i,
     dependencies: parseDeps(r[6]),
     constraints: r[8] ?? [],
+    ...(r[9] ? { notes: r[9] } : {}),
+    ...(r[10] ? { stand: r[10] } : {}),
   }))
+}
+
+/** Stand aus der Vorlage → Fortschritt, Status und Ist-Termine (Engine behandelt sie wie gemeldeten Fortschritt) */
+function standFelder(tt: TemplateTask): Partial<Task> {
+  const s = tt.stand
+  if (!s || tt.type === 'phase' || tt.type === 'group') return {}
+  if (s.status === 'done') return { status: 'done', progress: 100, actual_start: s.datum, actual_finish: s.datum }
+  return { status: 'in_progress', progress: Math.max(1, Math.min(99, s.progress)), actual_start: s.datum }
 }
 
 export function instantiateTemplate(
@@ -157,7 +167,7 @@ export function instantiateTemplate(
   trades: Trade[],
   newId: () => string,
   sectionByName?: Map<string, string>,
-): { tasks: Task[]; dependencies: TaskDependency[]; constraints: Omit<TaskConstraint, 'id' | 'created_at' | 'updated_at'>[] } {
+): { tasks: Task[]; dependencies: TaskDependency[]; constraints: Omit<TaskConstraint, 'id' | 'created_at' | 'updated_at'>[]; keyToId: Map<string, string> } {
   // Zeigt Abhängige im Terminplan von Anfang an nacheinander an (siehe orderByDependencies).
   const templateTasks = orderByDependencies(rawTemplateTasks)
   const idByKey = new Map<string, string>()
@@ -183,6 +193,7 @@ export function instantiateTemplate(
         section_id: tt.section_name && sectionByName ? sectionByName.get(tt.section_name.toLowerCase()) ?? null : null,
         notes: tt.notes ?? '',
         source_excerpt: tt.source_excerpt ?? null,
+        ...standFelder(tt),
       })
     })
   const dependencies: TaskDependency[] = []
@@ -195,7 +206,7 @@ export function instantiateTemplate(
     }
   }
   const constraints = templateTasks.flatMap((tt) => (tt.constraints ?? []).map((c) => ({ project_id: ctx.projectId, task_id: idByKey.get(tt.key)!, type: c.type, title: c.title, status: 'open' as const, due_date: null, responsible_user_id: null, note: '' })))
-  return { ...recompute({ tasks, dependencies }, ctx).state, constraints }
+  return { ...recompute({ tasks, dependencies }, ctx).state, constraints, keyToId: idByKey }
 }
 
 /** Projektstruktur als Vorlage einfrieren (Termine/Fortschritt werden verworfen) */
@@ -220,6 +231,7 @@ export function planToTemplateTasks(templateId: string, tasks: Task[], dependenc
         section_name: sections?.find((s) => s.id === t.section_id)?.name ?? null,
         sort_order: out.length,
         constraints: (constraints ?? []).filter((c) => c.task_id === t.id).map((c) => ({ type: c.type, title: c.title })),
+        ...(t.notes ? { notes: t.notes } : {}),
         dependencies: dependencies
           .filter((d) => d.successor_id === t.id && keyById.has(d.predecessor_id))
           .map((d) => ({ predecessor_key: keyById.get(d.predecessor_id)!, type: d.type, lag_days: d.lag_days })),

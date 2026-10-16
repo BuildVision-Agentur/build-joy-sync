@@ -10,6 +10,7 @@ import { ImportDialog } from '../components/ImportDialog'
 import { PlanAssistDialog } from '../components/PlanAssistDialog'
 
 import { BuildFlowPanel } from '../components/BuildFlowPanel'
+import { KlimPanel } from '../components/KlimPanel'
 import { RulesPanel } from '../components/RulesPanel'
 import { HOLIDAY_REGIONS, holidaysFor } from '../../shared/engine/holidays'
 import { formatDate } from '../../shared/engine/dates'
@@ -120,6 +121,7 @@ export function ProjectSettingsPage() {
             </ul>
           )}
         </Card>
+        <KlimPanel />
         <BuildFlowPanel />
         <RulesPanel projectId={p.projectId} />
         {(can('templates.manage') || can('project.delete') || can('plan.edit')) && (

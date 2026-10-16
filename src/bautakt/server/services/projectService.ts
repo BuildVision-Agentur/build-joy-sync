@@ -36,6 +36,8 @@ import { graftInstantiatedPlan, instantiateTemplate } from '../../shared/templat
 import { mapProcessToTemplate } from '../../shared/integrations/buildflow/adapter.ts'
 import { parseBuildFlowExport } from '../../shared/integrations/buildflow/types.ts'
 import { extractedToTemplateTasks, normalizeExtractedPlan, type ExtractedPlan } from '../../shared/integrations/planextract/types.ts'
+import { KLIM_TEMPLATE_IDS } from '../../shared/templates/klim.ts'
+import { TAFEL } from '../../shared/templates/klim-tafel.ts'
 import { HOLIDAY_REGIONS } from '../../shared/engine/holidays.ts'
 import { refreshProjectNotifications, pushNotification } from './notificationService.ts'
 import { broadcastProject } from './realtime.ts'
@@ -410,6 +412,10 @@ export class ProjectService {
         const plan = instantiateTemplate(tplTasks, ctx, await this.repo.trades(session.org.id), () => newId('t'), sectionByName)
         await this.replacePlan(id, plan.tasks, plan.dependencies)
         for (const c of plan.constraints) await this.db.insert('task_constraints', { id: newId('cs'), ...c, created_at: now, updated_at: now })
+        if (KLIM_TEMPLATE_IDS.includes(tpl.id)) {
+          // KLIM: Zuordnung Vorlagen-Schlüssel → Vorgang merken, damit spätere Tafel-Stände abgeglichen werden können
+          await this.db.insert('project_klim_links', { id: newId('kl'), project_id: id, template_id: tpl.id, tafel_stand: TAFEL.stand, pending_stand: null, mapping: Object.fromEntries(plan.keyToId), created_at: now, last_synced_at: null })
+        }
         await this.db.insert('change_history', {
           id: newId('ch'), project_id: id, task_id: null, task_name: '', user_id: session.user.id, user_name: session.user.name,
           created_at: now, field: 'plan', old_value: null, new_value: tpl.name, reason: 'Plan aus Vorlage erstellt', source: 'MANUAL',

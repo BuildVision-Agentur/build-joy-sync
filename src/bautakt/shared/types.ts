@@ -488,7 +488,7 @@ export interface ChangeHistoryEntry {
   source: ChangeSource
 }
 
-export type ChangeSource = 'MANUAL' | 'SITE_UPDATE' | 'SUBCONTRACTOR_PROPOSAL' | 'SCENARIO_APPLY' | 'IMPORT' | 'WORK_PACKAGE' | 'EMAIL' | 'BUILDFLOW_SYNC' | 'FUTURE_AI'
+export type ChangeSource = 'MANUAL' | 'SITE_UPDATE' | 'SUBCONTRACTOR_PROPOSAL' | 'SCENARIO_APPLY' | 'IMPORT' | 'WORK_PACKAGE' | 'EMAIL' | 'BUILDFLOW_SYNC' | 'KLIM_SYNC' | 'FUTURE_AI'
 
 /** Wortlaut jeder Jarvis-Anfrage, organisationsweit - auch ohne Projektbezug. Innerhalb eines
  *  Projekts landet dieselbe Anfrage zusätzlich in dessen change_history (field 'ki_anfrage'). */
@@ -522,8 +522,10 @@ export type ProposalOperation =
   | { op: 'update_dependency'; dependency_id: string; type?: DependencyType; lag_days?: number }
   | { op: 'remove_dependency'; dependency_id: string }
   | { op: 'add_constraint'; task_id?: string; task_key?: string; type: ConstraintKind; title: string; due_date?: ISODate | null }
+  /** Fortschritt/Status setzen, z. B. aus dem KLIM-Tafel-Abgleich (task_id darf ein add_task-Key sein) */
+  | { op: 'set_status'; task_id: string; status: TaskStatus; progress: number; actual_start?: ISODate | null; actual_finish?: ISODate | null }
 
-export type ProposalOrigin = 'share_link' | 'manual' | 'email' | 'buildflow' | 'ai'
+export type ProposalOrigin = 'share_link' | 'manual' | 'email' | 'buildflow' | 'klim' | 'ai'
 
 /** Terminänderungsvorschlag - verändert den Plan nie direkt; Projektleiter entscheidet. */
 export type ProposalStatus = 'open' | 'accepted' | 'rejected'
@@ -621,6 +623,8 @@ export interface TemplateTask {
   constraints: TemplateConstraint[]
   /** Optionale Notiz (z. B. BuildFlow-Rolle) */
   notes?: string
+  /** Optionaler Stand beim Anlegen (z. B. KLIM-Baufortschritt): erledigt/begonnen mit Ist-Datum */
+  stand?: { status: 'done' | 'in_progress'; progress: number; datum: ISODate } | null
   /** Herkunft bei KI-Erstellung: wörtliches Zitat aus dem Quelltext (siehe Task.source_excerpt) */
   source_excerpt?: string | null
 }

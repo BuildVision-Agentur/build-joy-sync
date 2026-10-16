@@ -226,6 +226,25 @@ export interface ProposalImpact {
   new_rule_violations: RuleViolation[]
 }
 
+export interface KlimLinkInfo {
+  linked: boolean
+  template_id: string | null
+  tafel_stand: string | null
+  last_synced_at: string | null
+  mapped_tasks: number
+  open_proposal_id: string | null
+  eingebauter_stand: string
+}
+
+export interface KlimDiff {
+  stand_alt: string
+  stand_neu: string
+  module: number
+  counts: { fertig: number; begonnen: number; dauer: number; coach: number; neu: number; entfernt: number; texte: number }
+  summary: string[]
+  operations: number
+}
+
 export interface ProcessLinkInfo {
   id: string
   process_id: string
@@ -437,6 +456,11 @@ export const api = {
     diff: (projectId: string, linkId: string, process: unknown) => request<{ process: { id: string; name: string; version: string }; same_process: boolean; counts: { added: number; changed: number; removed: number; edges_added: number; edges_removed: number }; summary: string[]; operations: ProposalOperation[] }>('POST', `/projects/${projectId}/process-links/${linkId}/diff`, { process }),
     sync: (projectId: string, linkId: string, process: unknown) => request<{ changed: boolean; message?: string; proposal?: ChangeProposal; counts?: { added: number; changed: number; removed: number; edges: number } }>('POST', `/projects/${projectId}/process-links/${linkId}/sync`, { process }),
     unlink: (projectId: string, linkId: string) => request<{ ok: true }>('DELETE', `/projects/${projectId}/process-links/${linkId}`),
+  },
+  klim: {
+    status: (projectId: string) => request<KlimLinkInfo>('GET', `/projects/${projectId}/klim`),
+    diff: (projectId: string, tafel?: unknown) => request<KlimDiff>('POST', `/projects/${projectId}/klim/diff`, { tafel }),
+    sync: (projectId: string, tafel?: unknown) => request<{ changed: boolean; message?: string; proposal?: ChangeProposal }>('POST', `/projects/${projectId}/klim/sync`, { tafel }),
   },
   email: {
     inbox: (status?: string) => request<InboundEmail[]>('GET', `/email/inbox${status ? `?status=${status}` : ''}`),

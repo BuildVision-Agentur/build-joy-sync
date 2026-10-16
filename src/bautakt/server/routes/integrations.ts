@@ -24,6 +24,10 @@ import { SAMPLE_BUILDFLOW_PROCESS, SAMPLE_BUILDFLOW_PROCESS_V2 } from '../../sha
 import { recompute } from '../../shared/engine/operations.ts'
 import { effectiveRules, evaluateRules, SYSTEM_RULES, type PlanRule, type RuleKind } from '../../shared/rules/engine.ts'
 import type { EmailProviderKind } from '../../shared/integrations/email/types.ts'
+import { TAFEL } from '../../shared/templates/klim-tafel.ts'
+import { parseTafel, bereinigeTafel } from '../../shared/templates/klim-tafel-parse.ts'
+import { klimAbgleich } from '../../shared/templates/klim-abgleich.ts'
+import type { TafelSnapshot } from '../../shared/templates/klim-tafel-typen.ts'
 
 export const integrationRoutes = new Hono<AppEnv>()
 
@@ -141,6 +145,79 @@ integrationRoutes.delete('/projects/:id/process-links/:lid', requireCap('plan.ed
   await requireProject(c, c.req.param('id'))
   await c.get('db').run('DELETE FROM project_process_links WHERE id = ? AND project_id = ?', c.req.param('lid'), c.req.param('id'))
   return c.json({ ok: true })
+})
+
+// ---------------------------------------------------------------- KLIM-Tafel-Abgleich
+interface KlimLinkRow { id: string; project_id: string; template_id: string; tafel_stand: string; pending_stand: string | null; mapping: string; created_at: string; last_synced_at: string | null }
+
+/** Tafel aus dem Request: Snapshot-Objekt, Dateitext (index.html/JSON) oder – ohne Angabe – der eingebaute Stand */
+function tafelAus(body: { tafel?: unknown }): TafelSnapshot {
+  if (body.tafel === undefined || body.tafel === null || body.tafel === '') return TAFEL
+  try {
+    return typeof body.tafel === 'string' ? parseTafel(body.tafel) : bereinigeTafel(body.tafel as Record<string, unknown>)
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message)
+  }
+}
+
+async function klimVergleich(c: Parameters<typeof requireProject>[0], projectId: string, tafel: TafelSnapshot) {
+  const { repo, session } = await requireProject(c, projectId)
+  const db = c.get('db') as AppEnv['Variables']['db']
+  const link = await db.get<KlimLinkRow>('SELECT * FROM project_klim_links WHERE project_id = ?', projectId)
+  if (!link) throw new HttpError(404, 'Dieses Projekt ist nicht aus einer KLIM-Vorlage entstanden.')
+  const mapping = JSON.parse(link.mapping) as Record<string, string>
+  try {
+    const r = klimAbgleich({ tafel, templateId: link.template_id, mapping, tasks: await repo.tasks(projectId), dependencies: await repo.dependencies(projectId), trades: await repo.trades(session.org.id) })
+    return { link, mapping, r }
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message)
+  }
+}
+
+integrationRoutes.get('/projects/:id/klim', async (c) => {
+  await requireProject(c, c.req.param('id'))
+  const db = c.get('db')
+  const link = await db.get<KlimLinkRow>('SELECT * FROM project_klim_links WHERE project_id = ?', c.req.param('id'))
+  const open = link ? await db.get<{ id: string }>("SELECT id FROM change_proposals WHERE project_id = ? AND origin_kind = 'klim' AND status = 'open'", c.req.param('id')) : null
+  return c.json({
+    linked: !!link, template_id: link?.template_id ?? null, tafel_stand: link?.tafel_stand ?? null, last_synced_at: link?.last_synced_at ?? null,
+    mapped_tasks: link ? Object.keys(JSON.parse(link.mapping)).length : 0, open_proposal_id: open?.id ?? null, eingebauter_stand: TAFEL.stand,
+  })
+})
+
+/** Vorschau: was sich mit diesem Tafel-Stand ändern würde (ohne Speichern) */
+integrationRoutes.post('/projects/:id/klim/diff', async (c) => {
+  const body = await c.req.json<{ tafel?: unknown }>().catch(() => ({}))
+  const tafel = tafelAus(body)
+  const { link, r } = await klimVergleich(c, c.req.param('id'), tafel)
+  return c.json({ stand_alt: link.tafel_stand, stand_neu: r.stand, module: tafel.modules.length, counts: r.counts, summary: r.summary, operations: r.operations.length })
+})
+
+/** Abgleich: Tafel-Stand → Change Proposal (KLIM_SYNC). Der laufende Plan bleibt unverändert, bis jemand übernimmt. */
+integrationRoutes.post('/projects/:id/klim/sync', requireCap('plan.edit'), async (c) => {
+  const { session, project } = await requireProject(c, c.req.param('id'))
+  const db = c.get('db')
+  if (await db.get("SELECT id FROM change_proposals WHERE project_id = ? AND origin_kind = 'klim' AND status = 'open'", project.id)) throw new HttpError(409, 'Es liegt bereits ein offener Tafel-Abgleich vor – bitte zuerst entscheiden.')
+  const body = await c.req.json<{ tafel?: unknown }>().catch(() => ({}))
+  const tafel = tafelAus(body)
+  const { link, r } = await klimVergleich(c, project.id, tafel)
+  if (!r.operations.length) {
+    await db.update('project_klim_links', link.id, { tafel_stand: r.stand, last_synced_at: nowISO() })
+    return c.json({ changed: false, message: `Keine Änderungen – der Plan entspricht dem Tafel-Stand ${r.stand}.` })
+  }
+  const kurz = [r.counts.fertig && `${r.counts.fertig} fertig`, r.counts.begonnen && `${r.counts.begonnen} begonnen`, r.counts.dauer && `${r.counts.dauer} Dauern`, r.counts.coach && `${r.counts.coach} Coach`, r.counts.neu && `${r.counts.neu} neu`, r.counts.entfernt && `${r.counts.entfernt} entfernt`].filter(Boolean).join(', ')
+  const p: ChangeProposal = {
+    id: newId('cp'), project_id: project.id, task_id: null, source: 'KLIM_SYNC', status: 'open', title: `KLIM-Tafel ${link.tafel_stand} → ${r.stand}${kurz ? `: ${kurz}` : ''}`,
+    proposed_start: null, proposed_end: null, operations: r.operations, reason: 'klim_sync', comment: r.summary.join(' · '), submitted_by_name: 'KLIM-Tafel-Abgleich', submitted_by_user_id: session.user.id, share_link_id: null,
+    origin_kind: 'klim', origin_ref: link.id, created_at: nowISO(), decided_at: null, decided_by: null, decision_note: '',
+  }
+  await db.transaction(async () => {
+    await db.insert('change_proposals', p)
+    await db.update('project_klim_links', link.id, { pending_stand: r.stand })
+  })
+  await broadcastProject(session.org.id, project.id, 'proposal')
+  pushNotification(db, { org_id: session.org.id, project_id: project.id, type: 'info', severity: 'warning', title: 'KLIM-Tafel hat sich geändert', message: `${project.name}: Stand ${r.stand} – ${kurz}. Änderungen prüfen.` })
+  return c.json({ changed: true, proposal: p, counts: r.counts }, 201)
 })
 
 // ---------------------------------------------------------------- E-Mail-Eingang

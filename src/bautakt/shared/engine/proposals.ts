@@ -118,6 +118,19 @@ export function applyOperations(state: PlanState, ctx: PlanContext, ops: Proposa
         next = removeDependency(next, ctx, op.dependency_id)
         break
       }
+      case 'set_status': {
+        const id = resolve(op.task_id)
+        if (!id) { warnings.push(`Vorgang ${op.task_id} nicht mehr vorhanden.`); break }
+        next = {
+          ...next,
+          tasks: next.tasks.map((t) => (t.id !== id ? t : {
+            ...t, status: op.status, progress: Math.max(0, Math.min(100, op.progress | 0)),
+            actual_start: op.actual_start !== undefined ? op.actual_start : t.actual_start,
+            actual_finish: op.actual_finish !== undefined ? op.actual_finish : t.actual_finish,
+          })),
+        }
+        break
+      }
       case 'add_constraint': {
         const id = op.task_key ? (keyToId.get(op.task_key) ?? null) : (op.task_id ? resolve(op.task_id) : null)
         if (!id) { warnings.push(`Voraussetzung „${op.title}“ übersprungen: Vorgang nicht vorhanden.`); break }
@@ -142,6 +155,7 @@ export function describeOperation(op: ProposalOperation, taskName: (id: string) 
     case 'update_dependency': return `Abhängigkeit ändern (${op.type ?? ''}${op.lag_days !== undefined ? ` Lag ${op.lag_days}` : ''})`
     case 'remove_dependency': return 'Abhängigkeit entfernen'
     case 'add_constraint': return `Voraussetzung: ${op.title}${op.due_date ? ` (bis ${fmt(op.due_date)})` : ''}`
+    case 'set_status': return `${taskName(op.task_id)} → ${op.status === 'done' ? 'fertig' : op.status === 'in_progress' ? `in Arbeit (${op.progress} %)` : op.status}${op.actual_finish ? ` (Ist ${fmt(op.actual_finish)})` : ''}`
   }
 }
 

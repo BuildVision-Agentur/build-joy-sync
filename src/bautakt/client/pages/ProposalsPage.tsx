@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
-import { Inbox, Check, X, ArrowRight, Plus, FlaskConical, AlertTriangle, Mail, Workflow, Link2, PenLine } from 'lucide-react'
+import { Inbox, Check, X, ArrowRight, Plus, FlaskConical, AlertTriangle, Mail, Workflow, Link2, PenLine, ListChecks } from 'lucide-react'
 import { useProject } from '../store/project'
 import { useOrg } from '../store/org'
 import { useToast } from '../store/toast'
@@ -20,7 +20,7 @@ import { formatDate, formatDateTime } from '../../shared/engine/dates'
 import { CHANGE_SOURCE_LABELS, DELAY_REASON_LABELS, PROPOSAL_ORIGIN_LABELS } from '../../shared/labels'
 import { flattenTree } from '../../shared/engine/operations'
 
-const ORIGIN_ICON: Record<ChangeProposal['origin_kind'], React.ReactNode> = { share_link: <Link2 size={12} />, manual: <PenLine size={12} />, email: <Mail size={12} />, buildflow: <Workflow size={12} />, ai: <span>✨</span> }
+const ORIGIN_ICON: Record<ChangeProposal['origin_kind'], React.ReactNode> = { share_link: <Link2 size={12} />, manual: <PenLine size={12} />, email: <Mail size={12} />, buildflow: <Workflow size={12} />, klim: <ListChecks size={12} />, ai: <span>✨</span> }
 const KIND_TONE: Record<'added' | 'changed' | 'removed', string> = { added: 'bg-ok-soft text-ok', changed: 'bg-brand-soft text-brand', removed: 'bg-danger-soft text-danger' }
 const KIND_LABEL: Record<'added' | 'changed' | 'removed', string> = { added: 'neu', changed: 'geändert', removed: 'entfernt' }
 

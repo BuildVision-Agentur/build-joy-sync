@@ -14,6 +14,7 @@ import { broadcastProject } from './realtime.ts'
 import type { ChangeProposal, ChangeSource, Session } from '../../shared/types.ts'
 import { applyOperations, proposalOperations } from '../../shared/engine/proposals.ts'
 import { newNodeKey } from '../../shared/integrations/buildflow/adapter.ts'
+import { NEU_PREFIX as KLIM_NEU_PREFIX } from '../../shared/templates/klim-abgleich.ts'
 
 const ALREADY_DECIDED = 'Vorschlag ist bereits entschieden.'
 
@@ -58,6 +59,16 @@ export async function decideProposal(db: Db, session: Session, projectId: string
           extra.push({ sql: 'UPDATE project_process_links SET mapping = ?, last_synced_at = ? WHERE id = ?', params: [JSON.stringify(mapping), now, p.origin_ref] })
         }
       }
+      if (p.origin_kind === 'klim' && p.origin_ref) {
+        // Zuordnung um neue Vorgänge ergänzen, entfernte streichen, Tafel-Stand übernehmen
+        const link = await db.get<{ mapping: string; pending_stand: string | null; tafel_stand: string }>('SELECT mapping, pending_stand, tafel_stand FROM project_klim_links WHERE id = ?', p.origin_ref)
+        if (link) {
+          const ids = new Set(applied.state.tasks.map((t) => t.id))
+          const mapping = Object.fromEntries(Object.entries(JSON.parse(link.mapping) as Record<string, string>).filter(([, id]) => ids.has(id)))
+          for (const [k, id] of applied.keyToId) if (k.startsWith(KLIM_NEU_PREFIX)) mapping[k.slice(KLIM_NEU_PREFIX.length)] = id
+          extra.push({ sql: 'UPDATE project_klim_links SET mapping = ?, tafel_stand = ?, pending_stand = NULL, last_synced_at = ? WHERE id = ?', params: [JSON.stringify(mapping), link.pending_stand ?? link.tafel_stand, now, p.origin_ref] })
+        }
+      }
       await svc.savePlan(
         session,
         projectId,
@@ -65,7 +76,9 @@ export async function decideProposal(db: Db, session: Session, projectId: string
         { extra },
       )
     } else {
-      await db.batch([markDecided])
+      const rejected: BatchStatement[] = [markDecided]
+      if (p.origin_kind === 'klim' && p.origin_ref) rejected.push({ sql: 'UPDATE project_klim_links SET pending_stand = NULL WHERE id = ?', params: [p.origin_ref] })
+      await db.batch(rejected)
     }
   } catch (e) {
     if (e instanceof BatchExpectationError && e.tag === 'proposal_decided') throw new HttpError(409, ALREADY_DECIDED)
@@ -77,6 +90,6 @@ export async function decideProposal(db: Db, session: Session, projectId: string
 }
 
 function sourceOf(p: ChangeProposal): ChangeSource {
-  if (p.source === 'FUTURE_AI' || p.source === 'EMAIL' || p.source === 'BUILDFLOW_SYNC') return p.source
+  if (p.source === 'FUTURE_AI' || p.source === 'EMAIL' || p.source === 'BUILDFLOW_SYNC' || p.source === 'KLIM_SYNC') return p.source
   return 'SUBCONTRACTOR_PROPOSAL'
 }
