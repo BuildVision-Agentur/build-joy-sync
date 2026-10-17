@@ -44,6 +44,7 @@ interface Props {
   onRevise(): void
   onExpandAll(): void
   onCollapseAll(): void
+  allCollapsed: boolean
   onSaveBaseline(): void
   onScenario(): void
   onCheck(): void
@@ -76,8 +77,10 @@ export function GanttToolbar(p: Props) {
             <IconButton title="Verkleinern" onClick={() => p.onZoom(-1)}><ZoomOut size={16} /></IconButton>
             <IconButton title="Zeilen höher" onClick={() => p.onRowHeight(1)}><Rows3 size={16} /></IconButton>
             <IconButton title="Zeilen niedriger" onClick={() => p.onRowHeight(-1)}><Rows2 size={16} /></IconButton>
-            <IconButton title="Alle aufklappen" onClick={p.onExpandAll}><ChevronsUpDown size={16} /></IconButton>
-            <IconButton title="Alle zuklappen" onClick={p.onCollapseAll}><ChevronsDownUp size={16} /></IconButton>
+            <Button onClick={p.allCollapsed ? p.onExpandAll : p.onCollapseAll} title={p.allCollapsed ? 'Alle Phasen aufklappen' : 'Alle Phasen zuklappen'}>
+              {p.allCollapsed ? <ChevronsUpDown size={16} /> : <ChevronsDownUp size={16} />}
+              {p.allCollapsed ? 'Alle aufklappen' : 'Alle zuklappen'}
+            </Button>
           </>
         )}
         {!p.readOnly && (

@@ -523,6 +523,7 @@ export function GanttWorkspace() {
         onInsertAssist={(mode) => setAssistOpen({ parentId: primaryId && !isVirtualId(primaryId) ? primaryId : null, mode })}
         onRevise={() => setReviseOpen(true)}
         onExpandAll={() => setCollapsed(new Set())}
+        allCollapsed={rows.some((r) => r.hasChildren) && rows.filter((r) => r.hasChildren && r.depth === 0).every((r) => r.collapsed)}
         onCollapseAll={() => setCollapsed(new Set(ganttView === 'all' || ganttView === 'phase' ? parents : rows.filter((r) => r.virtual).map((r) => r.task.id)))}
         onSaveBaseline={() => { setBaselineName(`Baseline ${(p.bundle?.baselines.length ?? 0) + 1} – ${formatDate(p.today)}`); setBaselineDialog(true) }}
         onScenario={() => navigate(`/projects/${p.projectId}/scenarios`)}
