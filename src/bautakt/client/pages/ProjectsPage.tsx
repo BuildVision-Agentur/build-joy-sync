@@ -47,8 +47,13 @@ export function ProjectsPage() {
   const canOrganize = groups.length > 0 && can('project.create')
 
   const assignGroup = async (id: string, groupId: string | null) => {
-    await api.projects.update(id, { group_id: groupId })
-    await load()
+    // Sofort verschieben, Server im Hintergrund – bei Fehler neu laden
+    setData((d) => d?.map((p) => (p.project.id === id ? { ...p, project: { ...p.project, group_id: groupId } } : p)) ?? d)
+    try {
+      await api.projects.update(id, { group_id: groupId })
+    } catch {
+      void load()
+    }
   }
 
   if (error) return <div className="p-6"><ErrorBox message={error} onRetry={load} /></div>
@@ -103,8 +108,8 @@ export function ProjectsPage() {
             <div
               key={sec.id ?? 'none'}
               className={clsx(showFolders && 'rounded-xl border-2 border-dashed p-3 transition-colors', showFolders && (overGroup === (sec.id ?? 'none') ? 'border-brand bg-brand-soft/20' : 'border-transparent'))}
-              onDragOver={showFolders ? (e) => { if (dragId && canDropHere(sec.id)(dragId)) { e.preventDefault(); setOverGroup(sec.id ?? 'none') } } : undefined}
-              onDragLeave={showFolders ? () => setOverGroup((c) => (c === (sec.id ?? 'none') ? null : c)) : undefined}
+              onDragOver={showFolders ? (e) => { if (dragId && canDropHere(sec.id)(dragId)) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; const k = sec.id ?? 'none'; if (overGroup !== k) setOverGroup(k) } } : undefined}
+              onDragLeave={showFolders ? (e) => { if (e.currentTarget.contains(e.relatedTarget as Node | null)) return; setOverGroup((c) => (c === (sec.id ?? 'none') ? null : c)) } : undefined}
               onDrop={showFolders ? (e) => {
                 e.preventDefault()
                 setOverGroup(null)
