@@ -62,6 +62,8 @@ export interface ProjectStore {
   updateTask(taskId: string, patch: Partial<Task>, reason?: string): void
   createTask(input: NewTaskInput, reason?: string): void
   deleteTasks(ids: string[]): void
+  /** Alle erledigten Vorgänge entfernen; liefert die Anzahl */
+  deleteCompletedTasks(): number
   duplicateTask(id: string): void
   indent(id: string): void
   outdent(id: string): void
@@ -411,6 +413,15 @@ export function ProjectProvider({ projectId, children }: { projectId: string; ch
       updateTask: (id, patch, reason) => apply((s, c) => ops.updateTaskFields(s, c, id, patch), reason),
       createTask: (input, reason) => apply((s, c) => ops.createTask(s, c, input), reason ?? 'Vorgang angelegt'),
       deleteTasks: (ids) => apply((s, c) => ops.deleteTasks(s, c, ids), 'Vorgang gelöscht'),
+      deleteCompletedTasks: () => {
+        let removed = 0
+        apply((s, c) => {
+          const r = ops.removeCompletedTasks(s, c, () => newClientId('dep'))
+          removed = r.removed
+          return r.state
+        }, 'Erledigte Vorgänge entfernt')
+        return removed
+      },
       duplicateTask: (id) => apply((s, c) => ops.duplicateTask(s, c, id, () => newClientId()), 'Vorgang dupliziert'),
       indent: (id) => apply((s, c) => ops.indentTask(s, c, id), 'Struktur geändert'),
       outdent: (id) => apply((s, c) => ops.outdentTask(s, c, id), 'Struktur geändert'),

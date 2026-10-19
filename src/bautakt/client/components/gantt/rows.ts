@@ -25,6 +25,8 @@ export interface GanttFilters {
   criticalOnly: boolean
   delayedOnly: boolean
   milestonesOnly: boolean
+  /** Erledigte Vorgänge ausblenden (Ansichtseinstellung, kein Filter im engeren Sinn) */
+  hideDone?: boolean
 }
 
 export const EMPTY_FILTERS: GanttFilters = { search: '', trade: '', company: '', responsible: '', section: '', status: '', from: '', to: '', criticalOnly: false, delayedOnly: false, milestonesOnly: false }
@@ -74,12 +76,14 @@ export function buildRows(
   const numberById = new Map<string, number>()
   flat.forEach((f, i) => numberById.set(f.task.id, i + 1))
   const active = hasActiveFilter(filters)
+  // „Erledigte ausblenden“ blendet aus, lässt aber Auf-/Zuklappen zu (anders als ein echter Filter)
+  const filtering = active || !!filters.hideDone
   const matches = matcher(filters, sched, today)
 
   if (view === 'trade' || view === 'section') {
     const sources = view === 'trade' ? groups.trades : groups.sections
     const keyOf = (t: Task) => (view === 'trade' ? t.trade_id : t.section_id) ?? ''
-    const leaves = flat.filter((f) => !f.hasChildren).map((f) => f.task).filter((t) => !active || matches(t))
+    const leaves = flat.filter((f) => !f.hasChildren).map((f) => f.task).filter((t) => !filtering || matches(t))
     const buckets = new Map<string, Task[]>()
     for (const t of leaves) (buckets.get(keyOf(t)) ?? buckets.set(keyOf(t), []).get(keyOf(t))!).push(t)
     const order = [...sources.map((s) => s.key), ...[...buckets.keys()].filter((k) => !sources.some((s) => s.key === k))]
@@ -120,7 +124,7 @@ export function buildRows(
 
   // Treffer + alle Vorfahren sichtbar halten
   let keep: Set<string> | null = null
-  if (active) {
+  if (filtering) {
     keep = new Set()
     const parentOf = new Map(tasks.map((t) => [t.id, t.parent_id]))
     const q = filters.search.trim().toLowerCase()
@@ -154,6 +158,7 @@ export function matcher(filters: GanttFilters, sched: ScheduleResult | null, tod
   const todayDay = toDayNumber(today)
   const q = filters.search.trim().toLowerCase()
   return (t: Task): boolean => {
+    if (filters.hideDone && t.status === 'done') return false
     if (q && !t.name.toLowerCase().includes(q)) return false
     if (filters.trade && t.trade_id !== filters.trade) return false
     if (filters.company && t.company_id !== filters.company) return false

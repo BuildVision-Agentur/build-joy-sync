@@ -396,6 +396,101 @@ export function deleteTasks(state: PlanState, ctx: PlanContext, ids: string[]): 
   ).state
 }
 
+/**
+ * Erledigte Vorgänge bestimmen, die gefahrlos entfernt werden können: erledigte Einzelvorgänge
+ * und Gruppen, in denen alles erledigt ist. Geliefert werden nur die obersten (Unterbäume gehen mit).
+ */
+export function completedTaskIds(tasks: Task[]): string[] {
+  const children = new Map<string | null, Task[]>()
+  const ids = new Set(tasks.map((t) => t.id))
+  for (const t of tasks) {
+    const p = t.parent_id && ids.has(t.parent_id) ? t.parent_id : null
+    if (!children.has(p)) children.set(p, [])
+    children.get(p)!.push(t)
+  }
+  const removable = new Set<string>()
+  const visit = (t: Task): boolean => {
+    const kids = children.get(t.id) ?? []
+    const results = kids.map(visit)
+    const ok = kids.length ? results.every(Boolean) : t.status === 'done'
+    if (ok) removable.add(t.id)
+    return ok
+  }
+  for (const r of children.get(null) ?? []) visit(r)
+  const byId = new Map(tasks.map((t) => [t.id, t]))
+  return [...removable].filter((id) => {
+    const parent = byId.get(id)?.parent_id
+    return !parent || !removable.has(parent)
+  })
+}
+
+/**
+ * Erledigte Vorgänge entfernen (siehe completedTaskIds). Hing ein offener Vorgang über erledigte
+ * Vorgänge an einem anderen offenen, bleibt diese Reihenfolge als direkte Abhängigkeit erhalten.
+ * Offene Vorgänge plant die Engine ohnehin nie vor heute - ohne erledigte Vorgänger rutscht nichts zurück.
+ */
+export function removeCompletedTasks(state: PlanState, ctx: PlanContext, newId: () => string): { state: PlanState; removed: number } {
+  const top = completedTaskIds(state.tasks)
+  if (!top.length) return { state, removed: 0 }
+  const remove = new Set<string>()
+  for (const id of top) {
+    remove.add(id)
+    for (const d of collectDescendants(state.tasks, id)) remove.add(d.id)
+  }
+  const preds = new Map<string, TaskDependency[]>()
+  for (const d of state.dependencies) {
+    if (!preds.has(d.successor_id)) preds.set(d.successor_id, [])
+    preds.get(d.successor_id)!.push(d)
+  }
+  /** offene Vorgänger eines entfernten Vorgangs (über weitere entfernte hinweg) */
+  const openPreds = (id: string, seen = new Set<string>()): string[] => {
+    if (seen.has(id)) return []
+    seen.add(id)
+    return (preds.get(id) ?? []).flatMap((d) => (remove.has(d.predecessor_id) ? openPreds(d.predecessor_id, seen) : [d.predecessor_id]))
+  }
+  const kept = state.dependencies.filter((d) => !remove.has(d.predecessor_id) && !remove.has(d.successor_id))
+  const has = new Set(kept.map((d) => `${d.predecessor_id}>${d.successor_id}`))
+  // Nur überbrücken, wo die Reihenfolge nicht schon über einen anderen Weg gesichert ist (keine doppelten Wege)
+  const adj = new Map<string, string[]>()
+  const link = (a: string, b: string) => (adj.get(a) ?? adj.set(a, []).get(a)!).push(b)
+  for (const d of kept) link(d.predecessor_id, d.successor_id)
+  const reaches = (from: string, to: string): boolean => {
+    const seen = new Set<string>([from])
+    const stack = [from]
+    while (stack.length) {
+      for (const n of adj.get(stack.pop()!) ?? []) {
+        if (n === to) return true
+        if (!seen.has(n)) {
+          seen.add(n)
+          stack.push(n)
+        }
+      }
+    }
+    return false
+  }
+  const bridges: TaskDependency[] = []
+  for (const d of state.dependencies) {
+    if (!remove.has(d.predecessor_id) || remove.has(d.successor_id)) continue
+    for (const p of openPreds(d.predecessor_id)) {
+      const k = `${p}>${d.successor_id}`
+      if (p === d.successor_id || has.has(k) || reaches(p, d.successor_id)) continue
+      has.add(k)
+      link(p, d.successor_id)
+      bridges.push(newDependency({ id: newId(), project_id: ctx.projectId, predecessor_id: p, successor_id: d.successor_id, type: 'FS', lag_days: 0 }))
+    }
+  }
+  // Zweiter Durchgang: Brücken streichen, deren Reihenfolge inzwischen auch über andere Wege gesichert ist
+  for (let i = bridges.length - 1; i >= 0; i--) {
+    const b = bridges[i]!
+    const list = adj.get(b.predecessor_id)!
+    list.splice(list.indexOf(b.successor_id), 1)
+    if (reaches(b.predecessor_id, b.successor_id)) bridges.splice(i, 1)
+    else list.push(b.successor_id)
+  }
+  const next = recompute({ tasks: state.tasks.filter((t) => !remove.has(t.id)), dependencies: [...kept, ...bridges] }, ctx).state
+  return { state: next, removed: remove.size }
+}
+
 export function duplicateTask(state: PlanState, ctx: PlanContext, id: string, newId: () => string): PlanState {
   const src = state.tasks.find((t) => t.id === id)
   if (!src) return state

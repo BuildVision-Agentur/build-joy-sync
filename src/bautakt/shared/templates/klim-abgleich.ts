@@ -53,6 +53,8 @@ export function klimAbgleich(e: KlimAbgleichEingabe): KlimAbgleichErgebnis {
     return id && byId.has(id) ? id : null
   }
   const ref = (key: string) => vorhanden(key) ?? NEU_PREFIX + key
+  // Im Plan bewusst entfernt (z. B. „Erledigte löschen“): Zuordnung bleibt als Merker, der Abgleich legt nichts davon wieder an
+  const entfernt = new Set<string>()
   const tradeId = new Map(e.trades.map((t) => [t.name.toLowerCase(), t.id]))
   const pfad = (z: TemplateTask) => {
     // „Modul · Weg · Schritt“ für lesbare Zusammenfassungen
@@ -79,6 +81,10 @@ export function klimAbgleich(e: KlimAbgleichEingabe): KlimAbgleichErgebnis {
 
   for (const z of zeilen) {
     const id = vorhanden(z.key)
+    if (!id && ((e.mapping[z.key] && !byId.has(e.mapping[z.key])) || (z.parent_key && entfernt.has(z.parent_key)))) {
+      entfernt.add(z.key)
+      continue
+    }
     if (!id) {
       // ---- neuer Vorgang
       neueKeys.push(z.key)
@@ -134,6 +140,7 @@ export function klimAbgleich(e: KlimAbgleichEingabe): KlimAbgleichErgebnis {
   for (const z of zeilen) {
     for (const d of z.dependencies) {
       if (vorhanden(d.predecessor_key) && vorhanden(z.key)) continue
+      if (entfernt.has(d.predecessor_key) || entfernt.has(z.key)) continue
       neuDeps.push({ op: 'add_dependency', predecessor: ref(d.predecessor_key), successor: ref(z.key), type: d.type, lag_days: d.lag_days })
     }
   }

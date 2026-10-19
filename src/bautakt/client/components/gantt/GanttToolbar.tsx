@@ -54,6 +54,9 @@ interface Props {
   dirty: boolean
   scenarioName?: string
   selectionCount: number
+  /** Anzahl erledigter Vorgänge (für „Erledigte ausblenden/löschen“) */
+  doneCount: number
+  onDeleteDone(): void
 }
 
 export function GanttToolbar(p: Props) {
@@ -99,6 +102,7 @@ export function GanttToolbar(p: Props) {
           </div>
           <Button size="sm" variant={active ? 'primary' : 'secondary'} onClick={() => setOpen(open === 'filter' ? null : 'filter')}><Filter size={14} /> Filter{active ? ' •' : ''}</Button>
           <Button size="sm" variant={p.filters.criticalOnly ? 'primary' : 'secondary'} onClick={() => set({ criticalOnly: !p.filters.criticalOnly })} className={clsx(p.filters.criticalOnly && 'bg-danger hover:bg-red-700')}>Kritischer Weg</Button>
+          {p.doneCount > 0 && <Button size="sm" variant={p.filters.hideDone ? 'primary' : 'secondary'} onClick={() => set({ hideDone: !p.filters.hideDone })} title={p.filters.hideDone ? 'Erledigte Vorgänge wieder anzeigen' : `${p.doneCount} erledigte Vorgänge ausblenden`}>{p.filters.hideDone ? `Erledigte einblenden (${p.doneCount})` : 'Erledigte ausblenden'}</Button>}
           {p.layoutMode === 'gantt' && p.hasBaseline && <Button size="sm" variant={p.showBaseline ? 'primary' : 'secondary'} onClick={() => p.onShowBaseline(!p.showBaseline)}><GitCompare size={14} /> Baseline</Button>}
           {p.layoutMode === 'gantt' && (
             <div className="relative">
@@ -164,7 +168,8 @@ export function GanttToolbar(p: Props) {
           <label className="text-xs"><span className="mb-1 block text-ink-faint">bis</span><Input type="date" value={p.filters.to} onChange={(e) => set({ to: e.target.value })} className="h-8 w-36 text-xs" /></label>
           <Checkbox label="Nur verspätete" checked={p.filters.delayedOnly} onChange={(e) => set({ delayedOnly: e.target.checked })} className="pb-2" />
           <Checkbox label="Nur Meilensteine" checked={p.filters.milestonesOnly} onChange={(e) => set({ milestonesOnly: e.target.checked })} className="pb-2" />
-          <Button size="sm" variant="ghost" onClick={() => p.onFilters(EMPTY_FILTERS)} disabled={!active}><X size={13} /> Zurücksetzen</Button>
+          <Button size="sm" variant="ghost" onClick={() => p.onFilters({ ...EMPTY_FILTERS, hideDone: p.filters.hideDone })} disabled={!active}><X size={13} /> Zurücksetzen</Button>
+          {!p.readOnly && p.doneCount > 0 && <Button size="sm" variant="ghost" className="ml-auto text-danger hover:bg-danger-soft" onClick={() => { setOpen(null); p.onDeleteDone() }}>Erledigte löschen ({p.doneCount})</Button>}
           <span className="ml-auto pb-2 text-[11px] text-ink-faint">Rechtsklick = Kontextmenü · <Kbd>Strg</Kbd>+Klick = Mehrfachauswahl · <Kbd>↑↓</Kbd> navigieren · <Kbd>Enter</Kbd> öffnen · <Kbd>Entf</Kbd> löschen</span>
         </div>
       )}

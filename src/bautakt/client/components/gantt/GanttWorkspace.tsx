@@ -82,7 +82,22 @@ export function GanttWorkspace() {
   const [layoutMode, setLayoutMode] = useState<'gantt' | 'kanban'>(prefs.layoutMode)
   const [cursorDay, setCursorDay] = useState<number | null>(null)
   const [copyDialog, setCopyDialog] = useState<{ ids: string[] } | null>(null)
-  const [filters, setFilters] = useState<GanttFilters>(EMPTY_FILTERS)
+  const [filters, setFiltersState] = useState<GanttFilters>(() => {
+    // „Erledigte ausblenden“ je Projekt merken
+    try {
+      return { ...EMPTY_FILTERS, hideDone: localStorage.getItem(`bt.hideDone.${p.projectId}`) === '1' }
+    } catch {
+      return EMPTY_FILTERS
+    }
+  })
+  const setFilters = (f: GanttFilters) => {
+    setFiltersState(f)
+    try {
+      localStorage.setItem(`bt.hideDone.${p.projectId}`, f.hideDone ? '1' : '0')
+    } catch {
+      /* ohne Speicher nur für diese Sitzung */
+    }
+  }
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(query.get('task') ? [query.get('task')!] : []))
   const [primaryId, setPrimaryId] = useState<string | null>(query.get('task'))
@@ -533,6 +548,14 @@ export function GanttWorkspace() {
         saving={p.saving}
         dirty={p.dirty}
         scenarioName={p.mode.kind === 'scenario' ? p.mode.scenario.name : undefined}
+        doneCount={p.plan.tasks.filter((t) => t.status === 'done').length}
+        onDeleteDone={() => {
+          const n = ops.completedTaskIds(p.plan.tasks).length
+          if (!n) return
+          if (!confirm('Alle erledigten Vorgänge aus dem Terminplan entfernen? Gruppen, in denen alles erledigt ist, gehen mit. Die Reihenfolge der offenen Vorgänge bleibt erhalten. Rückgängig machen ist möglich.')) return
+          const removed = p.deleteCompletedTasks()
+          toast.push(`${removed} erledigte Vorgänge entfernt.`, 'success')
+        }}
         selectionCount={selectedIds.size}
       />
       <div className="flex min-h-0 flex-1">

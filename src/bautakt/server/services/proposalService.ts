@@ -63,8 +63,8 @@ export async function decideProposal(db: Db, session: Session, projectId: string
         // Zuordnung um neue Vorgänge ergänzen, entfernte streichen, Tafel-Stand übernehmen
         const link = await db.get<{ mapping: string; pending_stand: string | null; tafel_stand: string }>('SELECT mapping, pending_stand, tafel_stand FROM project_klim_links WHERE id = ?', p.origin_ref)
         if (link) {
-          const ids = new Set(applied.state.tasks.map((t) => t.id))
-          const mapping = Object.fromEntries(Object.entries(JSON.parse(link.mapping) as Record<string, string>).filter(([, id]) => ids.has(id)))
+          // Zuordnungen entfernter Vorgänge bleiben als Merker stehen - sonst legt der nächste Abgleich sie wieder an
+          const mapping = JSON.parse(link.mapping) as Record<string, string>
           for (const [k, id] of applied.keyToId) if (k.startsWith(KLIM_NEU_PREFIX)) mapping[k.slice(KLIM_NEU_PREFIX.length)] = id
           extra.push({ sql: 'UPDATE project_klim_links SET mapping = ?, tafel_stand = ?, pending_stand = NULL, last_synced_at = ? WHERE id = ?', params: [JSON.stringify(mapping), link.pending_stand ?? link.tafel_stand, now, p.origin_ref] })
         }
