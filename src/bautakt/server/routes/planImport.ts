@@ -13,7 +13,7 @@ import { newId, nowISO } from '../db.ts'
 import { Repo } from '../repo.ts'
 import { ProjectService } from '../services/projectService.ts'
 import { extractPlanFromTextStream, generatePlanFromBriefStream, refinePlanStream, sortPlanWithAi } from '../services/aiPlanService.ts'
-import { getAiProvider } from '../services/aiGateway.ts'
+import { planAiConfigured } from '../services/aiCore.ts'
 import { dbStepCache, pruneAiTables } from '../services/aiStepCache.ts'
 import { formatDate } from '../../shared/engine/dates.ts'
 import { hatKlimBezug, klimFaktenText } from '../../shared/templates/klim-fakten.ts'
@@ -40,7 +40,7 @@ function logAiCommand(c: Context<AppEnv>, projectId: string | undefined, text: s
 
 planImportRoutes.get('/plan-import/status', (c) => {
   const hasLucid = lucidConfigured()
-  const hasAi = !!getAiProvider()
+  const hasAi = planAiConfigured()
   const hasJira = !!(process.env['JIRA_BASE_URL'] && process.env['JIRA_EMAIL'] && process.env['JIRA_API_TOKEN'])
   return c.json({
     lucidchart: { configured: hasLucid, note: hasLucid ? 'Verbunden – Diagramme können geladen werden.' : 'API-Schlüssel fehlt.' },

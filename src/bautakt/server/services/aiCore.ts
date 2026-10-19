@@ -12,6 +12,7 @@
  *     derselben Auftragskennung fertige Schritte sofort, statt sie neu zu rechnen
  */
 
+import Anthropic from '@anthropic-ai/sdk'
 import { HttpError } from '../auth.ts'
 import { AI_FALLBACK_MODEL, AI_PLAN_MODEL, aiPost, getAiProvider, modelId, readSse } from './aiGateway.ts'
 
@@ -118,23 +119,158 @@ export interface AiJsonOptions {
 
 const ATTEMPTS = 3
 
+// ---------------------------------------------------------------- Modellwahl
+/** Claude-Modelle laufen über die Anthropic-API, alles andere über OpenAI bzw. das Lovable-Gateway. */
+const isClaude = (model: string) => /^(anthropic\/)?claude-/.test(model)
+
+/** Modell für Planung und Import (AI_PLAN_MODEL, z. B. „o3-mini“ oder „claude-sonnet-5-5“) - bei jedem Aufruf neu gelesen. */
+export function planModel(): string {
+  return process.env['AI_PLAN_MODEL'] || AI_PLAN_MODEL
+}
+
+/** Ist für das eingestellte Planungsmodell ein Zugang hinterlegt? */
+export function planAiConfigured(): boolean {
+  return isClaude(planModel()) ? !!process.env['ANTHROPIC_API_KEY'] : !!getAiProvider()
+}
+
+let anthropic: Anthropic | null = null
+function anthropicClient(): Anthropic {
+  const apiKey = process.env['ANTHROPIC_API_KEY']
+  if (!apiKey) throw new HttpError(503, 'Für Claude ist kein ANTHROPIC_API_KEY hinterlegt.')
+  // Das SDK wiederholt 408/409/429/5xx und Verbindungsfehler selbst (mit Retry-After)
+  // Schlüssel ohne Workspace-Bindung brauchen die Workspace-ID als Kopfzeile (ANTHROPIC_WORKSPACE_ID)
+  const workspace = process.env['ANTHROPIC_WORKSPACE_ID']
+  if (!anthropic) anthropic = new Anthropic({ apiKey, maxRetries: 5, timeout: 20 * 60_000, ...(workspace ? { defaultHeaders: { 'anthropic-workspace-id': workspace } } : {}) })
+  return anthropic
+}
+
 /**
- * Ein strukturierter KI-Aufruf (Responses API, Streaming, striktes JSON-Schema) mit
- * Drosselung, Wiederholung, Ausweichmodell und Protokoll. Liefert das geparste JSON.
+ * Schema für Claude anpassen: Anthropic begrenzt Felder mit „Wert oder null“ (Typ-Listen/anyOf)
+ * auf 16 je Anfrage. Solche Felder werden darum zu optionalen Feldern (Grenze 24) - ein
+ * fehlendes Feld bedeutet „leer“, genau wie null in unserem Code.
  */
-export async function aiJson<T = unknown>(o: AiJsonOptions): Promise<T> {
+export function toClaudeSchema(schema: unknown): unknown {
+  if (Array.isArray(schema)) return schema.map(toClaudeSchema)
+  if (!schema || typeof schema !== 'object') return schema
+  const src = schema as Record<string, unknown>
+  const nullable = (p: unknown) => {
+    const q = p as { type?: unknown; enum?: unknown[] } | null
+    return (Array.isArray(q?.type) && q!.type.includes('null')) || (Array.isArray(q?.enum) && q!.enum.includes(null))
+  }
+  const stripNull = (p: unknown): unknown => {
+    if (!p || typeof p !== 'object') return p
+    const q = { ...(p as Record<string, unknown>) }
+    if (Array.isArray(q.type)) {
+      const types = (q.type as string[]).filter((t) => t !== 'null')
+      q.type = types.length === 1 ? types[0] : types
+    }
+    if (Array.isArray(q.enum)) q.enum = (q.enum as unknown[]).filter((v) => v !== null)
+    return q
+  }
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(src)) {
+    if (k === 'properties' && v && typeof v === 'object') {
+      out[k] = Object.fromEntries(Object.entries(v as Record<string, unknown>).map(([pk, pv]) => [pk, toClaudeSchema(stripNull(pv))]))
+    } else out[k] = toClaudeSchema(v)
+  }
+  if (src.type === 'object' && src.properties && Array.isArray(src.required)) {
+    const props = src.properties as Record<string, unknown>
+    out.required = (src.required as string[]).filter((k) => !nullable(props[k]))
+  }
+  return out
+}
+
+interface RunResult { out: string; incomplete: boolean; usage: { input: number; output: number } }
+
+/** OpenAI / Lovable-Gateway: Responses API mit striktem JSON-Schema. */
+async function runOpenAi(o: AiJsonOptions, model: string, signal: AbortSignal, touch: () => void, onText: (t: string) => void): Promise<RunResult> {
   const provider = getAiProvider()
   if (!provider) throw new HttpError(503, 'KI ist nicht konfiguriert.')
+  const res = await aiPost('/responses', {
+    model: modelId(provider, model),
+    stream: true,
+    instructions: o.system,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: o.user }] }],
+    reasoning: { effort: o.effort ?? 'medium' },
+    text: { format: { type: 'json_schema', name: o.schemaName, strict: true, schema: o.schema } },
+    store: false,
+    max_output_tokens: o.maxOutputTokens ?? 32_000,
+  }, { provider, signal })
+  let out = ''
+  let incomplete = false
+  let usage = { input: 0, output: 0 }
+  for await (const ev of readSse(res)) {
+    touch()
+    if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') {
+      out += ev.delta
+      onText(ev.delta)
+    } else if (ev.type === 'response.completed' || ev.type === 'response.incomplete') {
+      const r = ev.response as { output_text?: string; usage?: { input_tokens?: number; output_tokens?: number } } | undefined
+      if (!out && r?.output_text) out = r.output_text
+      usage = { input: r?.usage?.input_tokens ?? usage.input, output: r?.usage?.output_tokens ?? usage.output }
+      if (ev.type === 'response.incomplete') incomplete = true
+    } else if (ev.type === 'error' || ev.type === 'response.failed') {
+      throw new HttpError(502, `KI-Fehler: ${JSON.stringify(ev).slice(0, 200)}`)
+    }
+  }
+  return { out, incomplete, usage }
+}
+
+/** Claude (Anthropic Messages API): Streaming, adaptives Denken, JSON-Schema über output_config.format. */
+async function runClaude(o: AiJsonOptions, model: string, signal: AbortSignal, touch: () => void, onText: (t: string) => void): Promise<RunResult> {
+  const client = anthropicClient()
+  const id = model.replace(/^anthropic\//, '')
+  // Bei Ablehnung durch Sicherheitsfilter springt die API selbst auf ein passendes Modell um (nur bei Modellen, die das unterstützen)
+  const fallback = /^claude-(sonnet-5-5|opus-5-5|opus-5|fable-5-1)$/.test(id)
+  try {
+    const stream = client.beta.messages.stream({
+      model: id,
+      // Denken zählt in max_tokens mit - darum Luft über der eigentlichen Antwortlänge
+      max_tokens: Math.min(128_000, (o.maxOutputTokens ?? 32_000) + 32_000),
+      system: o.system,
+      messages: [{ role: 'user', content: o.user }],
+      thinking: { type: 'adaptive' },
+      output_config: { effort: o.effort ?? 'medium', format: { type: 'json_schema', schema: toClaudeSchema(o.schema) as Record<string, unknown> } },
+      ...(fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
+    }, { signal })
+    for await (const ev of stream) {
+      touch()
+      if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') onText(ev.delta.text)
+    }
+    const msg = await stream.finalMessage()
+    if (msg.stop_reason === 'refusal') throw new HttpError(502, 'Claude hat die Anfrage abgelehnt.')
+    // Endgültiger Inhalt statt gesammelter Teilstücke (bei einem Modellwechsel mitten im Lauf zählt nur das Ergebnis)
+    const out = msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('')
+    const incomplete = msg.stop_reason === 'max_tokens' || msg.stop_reason === 'model_context_window_exceeded'
+    return { out, incomplete, usage: { input: (msg.usage.input_tokens ?? 0) + (msg.usage.cache_read_input_tokens ?? 0), output: msg.usage.output_tokens ?? 0 } }
+  } catch (e) {
+    if (e instanceof HttpError || signal.aborted) throw e
+    if (e instanceof Anthropic.APIError) {
+      const status = e.status ?? 502
+      throw new HttpError(status === 429 ? 429 : status >= 500 ? 502 : status, `Claude: ${e.message.slice(0, 300)}`)
+    }
+    throw e
+  }
+}
+
+/**
+ * Ein strukturierter KI-Aufruf (Streaming, festes JSON-Schema) mit Drosselung, Wiederholung,
+ * Ausweichmodell und Protokoll - für OpenAI, Lovable-Gateway und Claude. Liefert das geparste JSON.
+ */
+export async function aiJson<T = unknown>(o: AiJsonOptions): Promise<T> {
   const started = Date.now()
   let lastError: unknown = null
   let usage = { input: 0, output: 0 }
-  let modelUsed = AI_PLAN_MODEL
+  const primary = planModel()
+  let modelUsed = primary
+  let attempts = 0
 
   await acquire()
   try {
     for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      attempts = attempt
       // Letzter Versuch mit dem Ausweichmodell, sofern eines eingestellt ist
-      modelUsed = attempt === ATTEMPTS && AI_FALLBACK_MODEL ? AI_FALLBACK_MODEL : AI_PLAN_MODEL
+      modelUsed = attempt === ATTEMPTS && AI_FALLBACK_MODEL ? AI_FALLBACK_MODEL : primary
       const ctrl = new AbortController()
       const onAbort = () => ctrl.abort(o.signal?.reason)
       o.signal?.addEventListener('abort', onAbort, { once: true })
@@ -144,46 +280,25 @@ export async function aiJson<T = unknown>(o: AiJsonOptions): Promise<T> {
         if (idle) clearTimeout(idle)
         idle = setTimeout(() => ctrl.abort(new Error('Zeitüberschreitung: keine Antwort der KI')), idleMs)
       }
+      let seen = ''
+      let lastCount = 0
+      const onText = (t: string) => {
+        if (!o.onProgress || !o.progressPattern) return
+        seen += t
+        const count = (seen.match(o.progressPattern) ?? []).length
+        if (count > lastCount) {
+          lastCount = count
+          o.onProgress(count)
+        }
+      }
       try {
         touch()
-        const res = await aiPost('/responses', {
-          model: modelId(provider, modelUsed),
-          stream: true,
-          instructions: o.system,
-          input: [{ role: 'user', content: [{ type: 'input_text', text: o.user }] }],
-          reasoning: { effort: o.effort ?? 'medium' },
-          text: { format: { type: 'json_schema', name: o.schemaName, strict: true, schema: o.schema } },
-          store: false,
-          max_output_tokens: o.maxOutputTokens ?? 32_000,
-        }, { provider, signal: ctrl.signal })
-
-        let out = ''
-        let incomplete = false
-        let lastCount = 0
-        for await (const ev of readSse(res)) {
-          touch()
-          if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') {
-            out += ev.delta
-            if (o.onProgress && o.progressPattern) {
-              const count = (out.match(o.progressPattern) ?? []).length
-              if (count > lastCount) {
-                lastCount = count
-                o.onProgress(count)
-              }
-            }
-          } else if (ev.type === 'response.completed' || ev.type === 'response.incomplete') {
-            const r = ev.response as { output_text?: string; usage?: { input_tokens?: number; output_tokens?: number } } | undefined
-            if (!out && r?.output_text) out = r.output_text
-            usage = { input: r?.usage?.input_tokens ?? usage.input, output: r?.usage?.output_tokens ?? usage.output }
-            if (ev.type === 'response.incomplete') incomplete = true
-          } else if (ev.type === 'error' || ev.type === 'response.failed') {
-            throw new HttpError(502, `KI-Fehler: ${JSON.stringify(ev).slice(0, 200)}`)
-          }
-        }
-        if (incomplete) {
-          // Parsebar trotz „incomplete“? Dann nehmen wir es (selten); sonst ehrlich als abgeschnitten melden.
+        const r = await (isClaude(modelUsed) ? runClaude : runOpenAi)(o, modelUsed, ctrl.signal, touch, onText)
+        usage = r.usage
+        if (r.incomplete) {
+          // Parsebar trotz Abbruch? Dann nehmen wir es (selten); sonst ehrlich als abgeschnitten melden.
           try {
-            const parsed = JSON.parse(out) as T
+            const parsed = JSON.parse(r.out) as T
             log({ label: o.label, model: modelUsed, status: 'ok', duration_ms: Date.now() - started, input_tokens: usage.input, output_tokens: usage.output, attempts: attempt, error: null })
             return parsed
           } catch {
@@ -191,8 +306,8 @@ export async function aiJson<T = unknown>(o: AiJsonOptions): Promise<T> {
             throw new AiTruncatedError()
           }
         }
-        if (!out.trim()) throw new HttpError(502, 'Die KI hat keine verwertbare Antwort geliefert.')
-        const parsed = JSON.parse(out) as T
+        if (!r.out.trim()) throw new HttpError(502, 'Die KI hat keine verwertbare Antwort geliefert.')
+        const parsed = JSON.parse(r.out) as T
         log({ label: o.label, model: modelUsed, status: 'ok', duration_ms: Date.now() - started, input_tokens: usage.input, output_tokens: usage.output, attempts: attempt, error: null })
         return parsed
       } catch (e) {
@@ -200,7 +315,7 @@ export async function aiJson<T = unknown>(o: AiJsonOptions): Promise<T> {
         if (o.signal?.aborted) throw e
         lastError = e
         // Endgültige Fehler (Guthaben, Zugriff, Konfiguration) nicht wiederholen
-        if (e instanceof HttpError && [400, 401, 402, 403, 503].includes(e.status)) break
+        if (e instanceof HttpError && [400, 401, 402, 403, 404, 503].includes(e.status)) break
       } finally {
         if (idle) clearTimeout(idle)
         o.signal?.removeEventListener('abort', onAbort)
@@ -210,7 +325,7 @@ export async function aiJson<T = unknown>(o: AiJsonOptions): Promise<T> {
     release()
   }
   const msg = lastError instanceof Error ? lastError.message : String(lastError)
-  log({ label: o.label, model: modelUsed, status: 'error', duration_ms: Date.now() - started, input_tokens: usage.input, output_tokens: usage.output, attempts: ATTEMPTS, error: msg.slice(0, 300) })
+  log({ label: o.label, model: modelUsed, status: 'error', duration_ms: Date.now() - started, input_tokens: usage.input, output_tokens: usage.output, attempts, error: msg.slice(0, 300) })
   if (lastError instanceof HttpError) throw lastError
   if (lastError instanceof SyntaxError) throw new HttpError(502, `${o.label}: Die KI-Antwort war mehrfach kein gültiges JSON.`)
   throw new HttpError(502, `${o.label}: ${msg}`)

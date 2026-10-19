@@ -130,6 +130,7 @@ export async function aiPost(path: string, body: unknown, opts: { provider?: AiP
 export function aiError(status: number, body: string): HttpError {
   if (status === 429) return new HttpError(429, 'Die KI ist gerade ausgelastet. Bitte in einer Minute erneut versuchen.')
   if (status === 402) return new HttpError(402, 'Das KI-Guthaben des Arbeitsbereichs ist aufgebraucht.')
+  if (status === 401) return new HttpError(401, 'Der KI-Schlüssel ist ungültig oder abgelaufen - bitte in den Einstellungen (Umgebungsvariablen) prüfen.')
   if (status === 403) return new HttpError(403, 'Die KI hat diese Anfrage abgelehnt.')
   if ((status === 400 || status === 404) && /model/i.test(body)) return new HttpError(502, `Das KI-Modell ist nicht verfügbar. ${body.slice(0, 200)}`)
   return new HttpError(502, `KI-Anfrage fehlgeschlagen (${status}). ${body.slice(0, 300)}`)
