@@ -69,7 +69,7 @@ const EDIT_SCHEMA = {
       description: 'Anforderungen, die keine Planänderung brauchen (z. B. reine Information, schon im Plan enthalten) - mit kurzer Begründung.',
       items: { type: 'object', additionalProperties: false, required: ['id', 'reason'], properties: { id: { type: 'string' }, reason: { type: 'string' } } },
     },
-    answers: { type: 'array', items: { type: 'string' }, description: 'Antworten auf Fragen der Anweisung (z. B. „wie lange würde es dauern“) - konkret mit Zahlen, Rechenweg und Ergebnis (Stunden, Arbeitstage, voraussichtliches Datum). Leer, wenn keine Frage gestellt ist oder sie schon beantwortet wurde.' },
+    answers: { type: 'array', items: { type: 'string' }, description: 'Antwort auf die Fragen der Anweisung (z. B. „wie lange würde es dauern“) als EINE zusammengefasste, in sich stimmige Antwort mit Zahlen, Rechenweg und Ergebnis (Stunden, Arbeitstage, voraussichtliches Datum) - meist ein einziger Eintrag. Sie ersetzt frühere Antworten vollständig; gib sie in jeder Runde vollständig an, solange sich Zahlen ändern. Leer, wenn keine Frage gestellt ist oder die bisherige Antwort weiter stimmt.' },
     warnings: { type: 'array', items: { type: 'string' }, description: 'Kurze Hinweise: getroffene Annahmen, Rechenwege, offene Fragen, ergänzte Punkte.' },
     complete: { type: 'boolean', description: 'true, wenn alle Änderungen für diesen Teil der Anweisung enthalten sind. false, wenn noch Änderungen fehlen (Antwort wäre sonst zu lang) - du wirst dann zum Weitermachen aufgefordert.' },
   },
@@ -680,9 +680,9 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
         const r = reqOf(n.id)
         if (r && !covered.has(r)) noChange.set(r, n.reason || 'keine Planänderung nötig')
       }
-      for (const a of res.answers ?? []) {
-        if (a?.trim() && !answers.includes(a.trim())) answers.push(a.trim())
-      }
+      // Jede Runde liefert die vollständige Antwort neu - nur die jüngste gilt (keine widersprüchlichen Mehrfachantworten)
+      const fresh = (res.answers ?? []).map((a) => a?.trim()).filter((a): a is string => !!a)
+      if (fresh.length) answers.splice(0, answers.length, ...fresh)
       // Operationen ohne Zuordnung zählen nicht als Abdeckung - aber als Fortschritt, falls sonst nichts passiert
       const unitsAfter = units()
       stall = unitsAfter > unitsBefore ? 0 : stall + 1
