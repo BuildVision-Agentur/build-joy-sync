@@ -182,6 +182,39 @@ export function toClaudeSchema(schema: unknown): unknown {
 
 interface RunResult { out: string; incomplete: boolean; usage: { input: number; output: number } }
 
+/** Anzahl optionaler Felder eines (für Claude angepassten) Schemas - Maß für die Komplexität. */
+function optionalCount(schema: unknown): number {
+  let n = 0
+  const walk = (x: unknown) => {
+    if (!x || typeof x !== 'object') return
+    if (Array.isArray(x)) return x.forEach(walk)
+    const o = x as Record<string, unknown>
+    if (o.type === 'object' && o.properties && typeof o.properties === 'object') {
+      const req = new Set(Array.isArray(o.required) ? (o.required as string[]) : [])
+      for (const k of Object.keys(o.properties as object)) if (!req.has(k)) n++
+    }
+    for (const v of Object.values(o)) walk(v)
+  }
+  walk(schema)
+  return n
+}
+
+/**
+ * Große Schemata lehnt Anthropics strikte JSON-Ausgabe mit „Schema is too complex“ ab (interne,
+ * nicht dokumentierte Grenze). Solche Schemata bekommt Claude als Vorgabe in der Anweisung und
+ * antwortet mit reinem JSON; einmal abgelehnte Schemata werden gemerkt.
+ */
+const CLAUDE_STRICT_MAX_OPTIONAL = 8
+const tooComplexForClaude = new Set<string>()
+
+/** JSON aus einer Textantwort holen (ohne Markdown-Zaun, ohne Text davor/danach). */
+function extractJson(text: string): string {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+  const a = t.indexOf('{')
+  const b = t.lastIndexOf('}')
+  return a >= 0 && b > a ? t.slice(a, b + 1) : t
+}
+
 /** OpenAI / Lovable-Gateway: Responses API mit striktem JSON-Schema. */
 async function runOpenAi(o: AiJsonOptions, model: string, signal: AbortSignal, touch: () => void, onText: (t: string) => void): Promise<RunResult> {
   const provider = getAiProvider()
@@ -222,15 +255,20 @@ async function runClaude(o: AiJsonOptions, model: string, signal: AbortSignal, t
   const id = model.replace(/^anthropic\//, '')
   // Bei Ablehnung durch Sicherheitsfilter springt die API selbst auf ein passendes Modell um (nur bei Modellen, die das unterstützen)
   const fallback = /^claude-(sonnet-5-5|opus-5-5|opus-5|fable-5-1)$/.test(id)
+  const schema = toClaudeSchema(o.schema) as Record<string, unknown>
+  const strict = !tooComplexForClaude.has(o.schemaName) && optionalCount(schema) <= CLAUDE_STRICT_MAX_OPTIONAL
+  const system = strict
+    ? o.system
+    : `${o.system}\n\nANTWORTFORMAT: Antworte ausschließlich mit einem einzigen JSON-Objekt - ohne Markdown, ohne Text davor oder danach -, das genau diesem JSON-Schema entspricht. Felder, die laut Beschreibung leer bleiben dürfen, kannst du weglassen.\n${JSON.stringify(schema)}`
   try {
     const stream = client.beta.messages.stream({
       model: id,
       // Denken zählt in max_tokens mit - darum Luft über der eigentlichen Antwortlänge
       max_tokens: Math.min(128_000, (o.maxOutputTokens ?? 32_000) + 32_000),
-      system: o.system,
+      system,
       messages: [{ role: 'user', content: o.user }],
       thinking: { type: 'adaptive' },
-      output_config: { effort: o.effort ?? 'medium', format: { type: 'json_schema', schema: toClaudeSchema(o.schema) as Record<string, unknown> } },
+      output_config: { effort: o.effort ?? 'medium', ...(strict ? { format: { type: 'json_schema' as const, schema } } : {}) },
       ...(fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
     }, { signal })
     for await (const ev of stream) {
@@ -240,12 +278,18 @@ async function runClaude(o: AiJsonOptions, model: string, signal: AbortSignal, t
     const msg = await stream.finalMessage()
     if (msg.stop_reason === 'refusal') throw new HttpError(502, 'Claude hat die Anfrage abgelehnt.')
     // Endgültiger Inhalt statt gesammelter Teilstücke (bei einem Modellwechsel mitten im Lauf zählt nur das Ergebnis)
-    const out = msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('')
+    const text = msg.content.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('')
+    const out = strict ? text : extractJson(text)
     const incomplete = msg.stop_reason === 'max_tokens' || msg.stop_reason === 'model_context_window_exceeded'
     return { out, incomplete, usage: { input: (msg.usage.input_tokens ?? 0) + (msg.usage.cache_read_input_tokens ?? 0), output: msg.usage.output_tokens ?? 0 } }
   } catch (e) {
     if (e instanceof HttpError || signal.aborted) throw e
     if (e instanceof Anthropic.APIError) {
+      // Schema zu komplex: merken und sofort ohne strikte Ausgabe wiederholen
+      if (strict && e.status === 400 && /schema is too complex/i.test(e.message)) {
+        tooComplexForClaude.add(o.schemaName)
+        return runClaude(o, model, signal, touch, onText)
+      }
       const status = e.status ?? 502
       throw new HttpError(status === 429 ? 429 : status >= 500 ? 502 : status, `Claude: ${e.message.slice(0, 300)}`)
     }
