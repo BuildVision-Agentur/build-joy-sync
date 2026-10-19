@@ -19,13 +19,13 @@ import type { TaskType } from '../../shared/types'
 const TYPE_LABELS: Record<TaskType, string> = { phase: 'Phase', group: 'Bereich', task: 'Aufgabe', milestone: 'Meilenstein' }
 
 /** Fortschritt während die KI den Plan entwirft: Prozent nähert sich asymptotisch 100 % (siehe progressPct-Formel), damit das Warten nicht länger wirkt als es ist. */
-function ProgressLine({ pct, count }: { pct: number; count: number }) {
+function ProgressLine({ pct, count, message, unit = 'Vorgänge entworfen' }: { pct: number; count: number; message?: string; unit?: string }) {
   return (
     <div className="space-y-1">
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-3">
         <div className="h-full rounded-full bg-brand transition-[width] duration-500 ease-out" style={{ width: `${Math.max(4, pct)}%` }} />
       </div>
-      <p className="text-xs text-ink-faint">{count > 0 ? `${count} Vorgänge entworfen … ${pct} %` : 'Text wird analysiert …'}</p>
+      <p className="text-xs text-ink-faint">{[message, count > 0 ? `${count} ${unit}` : !message ? 'Text wird analysiert …' : ''].filter(Boolean).join(' · ')}</p>
     </div>
   )
 }
@@ -71,6 +71,11 @@ export function PlanImportPanel({
   const [busy, setBusy] = useState<'' | 'lucid' | 'doc' | 'jira' | 'ai' | 'sort' | 'refine'>('')
   const [fileName, setFileName] = useState('')
   const [draftedCount, setDraftedCount] = useState(0)
+  const [progressMsg, setProgressMsg] = useState('')
+  const onProgress = (n: number, message?: string) => {
+    setDraftedCount(n)
+    if (message) setProgressMsg(message)
+  }
   // Es ist vorher nicht bekannt, wie viele Aufgaben am Ende herauskommen - die Prozentzahl
   // nähert sich darum asymptotisch 100 % an (schnell am Anfang, langsamer danach), statt eine
   // falsche Gesamtzahl vorzutäuschen. Fertig wird sie erst durch das tatsächliche Ergebnis.
@@ -84,6 +89,7 @@ export function PlanImportPanel({
   const run = async (kind: typeof busy, fn: () => Promise<ExtractedPlan>, okMessage: string) => {
     setBusy(kind)
     setDraftedCount(0)
+    setProgressMsg('')
     try {
       onPlan(await fn())
       toast.push(okMessage, 'success')
@@ -100,7 +106,7 @@ export function PlanImportPanel({
       const direct = await extractPlanFromTable(file)
       if (direct) return direct
       const text = await extractDocumentText(file)
-      return api.planImport.document({ text, file_name: file.name, hint: hint || undefined }, setDraftedCount)
+      return api.planImport.document({ text, file_name: file.name, hint: hint || undefined }, onProgress)
     }, 'Dokument ausgewertet – bitte prüfen.')
   }
 
@@ -176,7 +182,7 @@ export function PlanImportPanel({
             <input type="file" accept={SUPPORTED_DOCUMENT_TYPES} className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void loadDocument(f) }} />
           </label>
           {fileName && <p className="text-xs text-ink-faint">{fileName}</p>}
-          {busy === 'doc' && <ProgressLine pct={progressPct} count={draftedCount} />}
+          {busy === 'doc' && <ProgressLine pct={progressPct} count={draftedCount} message={progressMsg} />}
           <p className="text-xs text-ink-faint">Die KI liest den Text, gliedert ihn in Phasen und Aufgaben, schätzt Dauern und erkennt Abhängigkeiten sowie genannte Personen.</p>
         </div>
       )}
@@ -202,8 +208,8 @@ export function PlanImportPanel({
           <Field label="Beschreibe das Vorhaben">
             <Textarea rows={5} value={brief} onChange={(e) => setBrief(e.target.value)} placeholder="z. B. Einführung eines neuen Coaching-Programms in acht Wochen: Konzept, Materialien, Pilotgruppe, Auswertung, Start." />
           </Field>
-          <Button size="sm" variant="secondary" disabled={brief.trim().length < 10 || !!busy} loading={busy === 'ai'} onClick={() => void run('ai', () => api.planImport.generate({ brief, kind: planningKind, people: peopleNames, project_id: projectId }, setDraftedCount), 'Planentwurf erstellt – bitte prüfen.')}>Plan von der KI entwerfen</Button>
-          {busy === 'ai' && <ProgressLine pct={progressPct} count={draftedCount} />}
+          <Button size="sm" variant="secondary" disabled={brief.trim().length < 10 || !!busy} loading={busy === 'ai'} onClick={() => void run('ai', () => api.planImport.generate({ brief, kind: planningKind, people: peopleNames, project_id: projectId }, onProgress), 'Planentwurf erstellt – bitte prüfen.')}>Plan von der KI entwerfen</Button>
+          {busy === 'ai' && <ProgressLine pct={progressPct} count={draftedCount} message={progressMsg} />}
           <p className="text-xs text-ink-faint">Die KI entwirft Phasen, Aufgaben, Dauern und Abhängigkeiten und ordnet Personen aus deinem Team zu.</p>
         </div>
       )}
@@ -218,10 +224,12 @@ export function PlanImportPanel({
             <div className="flex flex-wrap items-center gap-2">
               <Button size="sm" variant="ghost" disabled={!!busy} loading={busy === 'sort'} onClick={() => void run('sort', () => api.planImport.sort(plan), 'Reihenfolge sortiert – bitte prüfen.')}><Wand2 size={14} /> Reihenfolge mit KI sortieren</Button>
             </div>
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Input value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="Änderung beschreiben, z. B. „Testphase mit Abnahme ergänzen“" />
-              <Button size="sm" variant="secondary" disabled={!instruction.trim() || !!busy} loading={busy === 'refine'} onClick={() => void run('refine', () => api.planImport.refine({ plan, instruction, people: peopleNames, project_id: projectId }, setDraftedCount), 'Plan überarbeitet – bitte prüfen.')}><Sparkles size={14} /> Mit KI überarbeiten</Button>
+            <Textarea rows={instruction.length > 200 ? 8 : 3} value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="Änderungen beschreiben – gern ausführlich, auch lange Listen, z. B. „Testphase mit Abnahme ergänzen“" />
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="secondary" disabled={!instruction.trim() || !!busy} loading={busy === 'refine'} onClick={() => void run('refine', () => api.planImport.refine({ plan, instruction, people: peopleNames, project_id: projectId }, onProgress), 'Plan überarbeitet – bitte prüfen.')}><Sparkles size={14} /> Mit KI überarbeiten</Button>
+              {instruction.length > 0 && <span className="text-xs text-ink-faint">{instruction.length.toLocaleString('de-DE')} Zeichen</span>}
             </div>
+            {busy === 'refine' && <ProgressLine pct={progressPct} count={draftedCount} message={progressMsg} unit="Änderungen umgesetzt" />}
           </div>
 
           {!!plan.warnings?.length && (

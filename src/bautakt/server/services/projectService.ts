@@ -33,6 +33,7 @@ import { resolveCalendars } from '../../shared/engine/calendar.ts'
 import { formatDate, fromDayNumber, todayISO, toDayNumber } from '../../shared/engine/dates.ts'
 import { DELAY_REASON_LABELS, SITE_FLAG_LABELS } from '../../shared/labels.ts'
 import { graftInstantiatedPlan, instantiateTemplate } from '../../shared/templates/instantiate.ts'
+import { newDependency, newTask } from '../../shared/engine/defaults.ts'
 import { mapProcessToTemplate } from '../../shared/integrations/buildflow/adapter.ts'
 import { parseBuildFlowExport } from '../../shared/integrations/buildflow/types.ts'
 import { extractedToTemplateTasks, normalizeExtractedPlan, type ExtractedPlan } from '../../shared/integrations/planextract/types.ts'
@@ -525,6 +526,7 @@ export class ProjectService {
     const { tasks: tplTasks, responsibleByKey } = extractedToTemplateTasks(plan, prefix)
     const instantiated = instantiateTemplate(tplTasks, ctx, trades, () => newId('t'))
     const idByKey = new Map(tplTasks.map((tt, idx) => [tt.key, instantiated.tasks[idx].id]))
+    applyStartConstraints(plan, prefix, idByKey, instantiated.tasks)
 
     // Verantwortliche zuordnen: exakte E-Mail, sonst Namensvergleich
     const unmatched: string[] = []
@@ -596,8 +598,12 @@ export class ProjectService {
       this.repo.members(session.org.id),
     ])
     const ctx = this.planContext(bundle)
+    // Überarbeitung des eigenen Plans (Schlüssel = echte Vorgangs-IDs): bestehende Vorgänge behalten
+    // Status, Fortschritt, Ist-Termine, Kategorie usw.; nur geänderte Felder werden übernommen.
+    if (plan.tasks.some((t) => bundle.tasks.some((b) => b.id === t.key))) return mergeRevisedPlan(bundle, plan, ctx, members)
     const { tasks: tplTasks, responsibleByKey } = extractedToTemplateTasks(plan, 'rev')
     const instantiated = instantiateTemplate(tplTasks, ctx, trades, () => newId('t'))
+    applyStartConstraints(plan, 'rev', new Map(tplTasks.map((tt, idx) => [tt.key, instantiated.tasks[idx].id])), instantiated.tasks)
     const idByKey = new Map(tplTasks.map((tt, idx) => [tt.key, instantiated.tasks[idx].id]))
 
     const unmatched: string[] = []
@@ -823,4 +829,90 @@ function fmt(v: unknown): string | null {
   if (v === null || v === undefined) return null
   if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v)) return formatDate(v as ISODate)
   return String(v)
+}
+
+/** „Frühestens am …“ aus dem Entwurf als Einschränkung (SNET) auf die angelegten Vorgänge übertragen. */
+function applyStartConstraints(plan: ExtractedPlan, prefix: string, idByKey: Map<string, string>, tasks: Task[]): void {
+  for (const et of plan.tasks) {
+    if (!et.start_no_earlier) continue
+    const t = tasks.find((x) => x.id === idByKey.get(`${prefix}_${et.key}`))
+    if (t) {
+      t.constraint_type = 'snet'
+      t.constraint_date = et.start_no_earlier
+    }
+  }
+}
+
+/** Person aus Freitext (Name oder E-Mail) einem Teammitglied zuordnen. */
+function matchMember(members: OrganizationMember[], who: string): OrganizationMember | undefined {
+  const needle = who.trim().toLowerCase()
+  return members.find((m) => m.user && (m.user.email.toLowerCase() === needle || m.user.name.toLowerCase() === needle))
+    ?? members.find((m) => m.user && (m.user.name.toLowerCase().includes(needle) || needle.includes(m.user.name.toLowerCase())))
+}
+
+/**
+ * Überarbeiteten Entwurf mit dem bestehenden Plan zusammenführen: Vorgänge, deren Schlüssel eine
+ * bestehende ID ist, werden fortgeschrieben (Status, Fortschritt, Ist-Termine, Kategorie, Firma …
+ * bleiben), neue Vorgänge werden angelegt, nicht mehr enthaltene fallen weg. Bestehende
+ * Abhängigkeiten behalten ihre ID. Ergebnis wird terminiert, aber nicht gespeichert.
+ */
+export function mergeRevisedPlan(bundle: ProjectBundle, plan: ExtractedPlan, ctx: PlanContext, members: OrganizationMember[]): { tasks: Task[]; dependencies: TaskDependency[]; unmatched: string[] } {
+  const existing = new Map(bundle.tasks.map((t) => [t.id, t]))
+  const userById = new Map(members.filter((m) => m.user).map((m) => [m.user_id, m.user!]))
+  const idByKey = new Map(plan.tasks.map((t) => [t.key, existing.has(t.key) ? t.key : newId('t')]))
+  const orderInParent = new Map<string | null, number>()
+  const unmatched: string[] = []
+  const tasks: Task[] = plan.tasks.map((et) => {
+    const id = idByKey.get(et.key)!
+    const prev = existing.get(et.key)
+    const parent_id = et.parent_key ? idByKey.get(et.parent_key) ?? null : null
+    const sort_order = orderInParent.get(parent_id) ?? 0
+    orderInParent.set(parent_id, sort_order + 1)
+    const duration = et.type === 'milestone' ? 0 : Math.max(1, Math.round(et.duration ?? 1))
+    const base: Task = prev ? { ...prev } : newTask({ id, project_id: bundle.project.id, name: et.name, type: et.type, start: bundle.project.start_date, duration })
+    const t: Task = { ...base, id, parent_id, name: et.name, type: et.type, sort_order, duration, notes: et.notes ?? base.notes ?? '', source_excerpt: et.source_excerpt ?? base.source_excerpt ?? null }
+    if (et.start_no_earlier) {
+      t.constraint_type = 'snet'
+      t.constraint_date = et.start_no_earlier
+    } else if (prev?.constraint_type === 'snet') {
+      t.constraint_type = 'asap'
+      t.constraint_date = null
+    }
+    // Verantwortliche: unverändert lassen, wenn der Entwurf dieselbe Person nennt (E-Mail bzw. Freitext wie in tasksToExtractedPlan)
+    const prevWho = prev ? (prev.responsible_user_id ? (userById.get(prev.responsible_user_id)?.email ?? (prev.responsible_name || null)) : (prev.responsible_name || null)) : null
+    const who = et.responsible?.trim() || null
+    if (who !== prevWho) {
+      if (!who) {
+        t.responsible_user_id = null
+        t.responsible_user_ids = []
+        t.responsible_name = ''
+      } else {
+        const hit = matchMember(members, who)
+        if (hit?.user) {
+          t.responsible_user_id = hit.user_id
+          t.responsible_user_ids = [hit.user_id]
+          t.responsible_name = ''
+        } else {
+          t.responsible_user_id = null
+          t.responsible_user_ids = []
+          t.responsible_name = who
+          if (!unmatched.includes(who)) unmatched.push(who)
+        }
+      }
+    }
+    return t
+  })
+  const prevDep = new Map(bundle.dependencies.map((d) => [`${d.predecessor_id}>${d.successor_id}`, d]))
+  const dependencies: TaskDependency[] = []
+  for (const et of plan.tasks) {
+    const succ = idByKey.get(et.key)!
+    for (const d of et.depends_on ?? []) {
+      const pred = idByKey.get(d.predecessor_key)
+      if (!pred || pred === succ) continue
+      const old = prevDep.get(`${pred}>${succ}`)
+      dependencies.push(old ? { ...old, type: d.type ?? old.type, lag_days: d.lag_days ?? old.lag_days } : newDependency({ id: newId('dep'), project_id: bundle.project.id, predecessor_id: pred, successor_id: succ, type: d.type ?? 'FS', lag_days: d.lag_days ?? 0 }))
+    }
+  }
+  const state = recompute({ tasks, dependencies }, ctx).state
+  return { tasks: state.tasks, dependencies: state.dependencies, unmatched }
 }

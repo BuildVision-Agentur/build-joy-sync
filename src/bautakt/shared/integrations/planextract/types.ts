@@ -4,7 +4,7 @@
  * und danach wie jede Vorlage instanziiert – die Terminrechnung bleibt unverändert.
  */
 
-import type { OrganizationMember, Task, TaskDependency, TaskType, TemplateTask } from '../../types.ts'
+import type { ISODate, OrganizationMember, Task, TaskDependency, TaskType, TemplateTask } from '../../types.ts'
 
 export type ExtractedSource = 'lucidchart' | 'document'
 
@@ -28,6 +28,8 @@ export interface ExtractedTask {
   /** Wörtliches Zitat aus dem Quelltext, das zu diesem Vorgang geführt hat (siehe Task.source_excerpt) */
   source_excerpt?: string | null
   depends_on?: ExtractedDependency[]
+  /** Frühester Beginn (Einschränkung „nicht vor“), z. B. „ab 9.11.“ */
+  start_no_earlier?: ISODate | null
 }
 
 export interface ExtractedPlan {
@@ -65,6 +67,7 @@ export function normalizeExtractedPlan(raw: unknown, fallback: Partial<Extracted
       responsible: t.responsible ? String(t.responsible) : null,
       notes: t.notes ? String(t.notes) : '',
       source_excerpt: t.source_excerpt ? String(t.source_excerpt) : null,
+      start_no_earlier: typeof t.start_no_earlier === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.start_no_earlier) ? t.start_no_earlier : null,
       depends_on: deps
         .map((d) => (typeof d === 'string' ? { predecessor_key: d } : (d as ExtractedDependency)))
         .filter((d) => d && typeof d.predecessor_key === 'string')
@@ -107,6 +110,7 @@ export function tasksToExtractedPlan(tasks: Task[], dependencies: TaskDependency
       responsible: t.responsible_user_id ? (userById.get(t.responsible_user_id)?.email ?? (t.responsible_name || null)) : (t.responsible_name || null),
       notes: t.notes || '',
       source_excerpt: t.source_excerpt,
+      start_no_earlier: t.constraint_type === 'snet' && t.constraint_date ? t.constraint_date : null,
       depends_on: (depsBySuccessor.get(t.id) ?? [])
         .filter((d) => ids.has(d.predecessor_id))
         .map((d) => ({ predecessor_key: d.predecessor_id, type: d.type, lag_days: d.lag_days })),

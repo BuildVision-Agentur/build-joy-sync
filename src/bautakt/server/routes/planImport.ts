@@ -14,6 +14,8 @@ import { Repo } from '../repo.ts'
 import { ProjectService } from '../services/projectService.ts'
 import { extractPlanFromTextStream, generatePlanFromBriefStream, refinePlanStream, sortPlanWithAi } from '../services/aiPlanService.ts'
 import { getAiProvider } from '../services/aiGateway.ts'
+import { dbStepCache, pruneAiTables } from '../services/aiStepCache.ts'
+import { formatDate } from '../../shared/engine/dates.ts'
 import { fetchLucidPlan, lucidConfigured } from '../services/lucidService.ts'
 import { jiraToExtractedPlan, type JiraSearchResponse } from '../../shared/integrations/jira/adapter.ts'
 import { normalizeExtractedPlan, type ExtractedPlan } from '../../shared/integrations/planextract/types.ts'
@@ -56,7 +58,9 @@ planImportRoutes.post('/plan-import/lucidchart', requireCap('project.create'), a
 /** Wie oben, aber als Server-Sent-Events: meldet zwischendurch die Anzahl entworfener Aufgaben,
  *  damit die Oberfläche einen Fortschritt statt nur eines Ladesymbols zeigen kann. */
 planImportRoutes.post('/plan-import/document', requireCap('project.create'), async (c) => {
-  const body = await c.req.json<{ text: string; file_name?: string; hint?: string }>()
+  const body = await c.req.json<{ text: string; file_name?: string; hint?: string; job_id?: string }>()
+  const cache = dbStepCache(c.get('db'), c.get('session').org.id, body.job_id)
+  pruneAiTables(c.get('db'))
   if (!body.text?.trim()) throw new HttpError(400, 'Es wurde kein Text aus dem Dokument übergeben.')
   c.header('Cache-Control', 'no-cache, no-transform')
   c.header('X-Accel-Buffering', 'no')
@@ -64,7 +68,7 @@ planImportRoutes.post('/plan-import/document', requireCap('project.create'), asy
     c,
     async (stream) => {
       try {
-        for await (const ev of extractPlanFromTextStream(body.text, body.file_name ?? 'Dokument', body.hint)) await stream.writeSSE({ data: JSON.stringify(ev) })
+        for await (const ev of extractPlanFromTextStream(body.text, body.file_name ?? 'Dokument', body.hint, { cache })) await stream.writeSSE({ data: JSON.stringify(ev) })
       } catch (e) {
         await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: e instanceof HttpError ? e.message : 'Die Auswertung ist fehlgeschlagen.' }) })
       }
@@ -116,7 +120,9 @@ planImportRoutes.post('/plan-import/jira', requireCap('project.create'), async (
 // ---------------------------------------------------------------- KI-Assistent
 /** Projektplan aus einer freien Beschreibung entwerfen - als Server-Sent-Events (siehe oben). */
 planImportRoutes.post('/plan-import/generate', requireCap('project.create'), async (c) => {
-  const body = await c.req.json<{ brief: string; kind?: string; people?: string[]; project_id?: string }>()
+  const body = await c.req.json<{ brief: string; kind?: string; people?: string[]; project_id?: string; job_id?: string }>()
+  const cache = dbStepCache(c.get('db'), c.get('session').org.id, body.job_id)
+  pruneAiTables(c.get('db'))
   logAiCommand(c, body.project_id, body.brief ?? '', 'KI: Plan aus Beschreibung entworfen')
   c.header('Cache-Control', 'no-cache, no-transform')
   c.header('X-Accel-Buffering', 'no')
@@ -124,7 +130,7 @@ planImportRoutes.post('/plan-import/generate', requireCap('project.create'), asy
     c,
     async (stream) => {
       try {
-        for await (const ev of generatePlanFromBriefStream(body.brief ?? '', { kind: body.kind, people: body.people })) await stream.writeSSE({ data: JSON.stringify(ev) })
+        for await (const ev of generatePlanFromBriefStream(body.brief ?? '', { kind: body.kind, people: body.people }, { cache })) await stream.writeSSE({ data: JSON.stringify(ev) })
       } catch (e) {
         await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: e instanceof HttpError ? e.message : 'Der Entwurf ist fehlgeschlagen.' }) })
       }
@@ -138,16 +144,21 @@ planImportRoutes.post('/plan-import/generate', requireCap('project.create'), asy
 
 /** Einen Planentwurf per Anweisung erweitern oder optimieren. */
 planImportRoutes.post('/plan-import/refine', requireCap('project.create'), async (c) => {
-  const body = await c.req.json<{ plan: ExtractedPlan; instruction: string; people?: string[]; project_id?: string }>()
+  const body = await c.req.json<{ plan: ExtractedPlan; instruction: string; people?: string[]; project_id?: string; job_id?: string }>()
+  const cache = dbStepCache(c.get('db'), c.get('session').org.id, body.job_id)
+  pruneAiTables(c.get('db'))
   logAiCommand(c, body.project_id, body.instruction ?? '', 'KI: Plan überarbeitet')
   const plan = normalizeExtractedPlan(body.plan, { source: body.plan?.source ?? 'document' })
+  // Projektbezug für Datumsangaben in der Anweisung ("ab 9.11.", "Ende November")
+  const project = body.project_id ? await new Repo(c.get('db')).project(c.get('session').org.id, body.project_id) : undefined
+  const context = project ? `Projekt „${project.name}“, Projektstart ${formatDate(project.start_date)} (${project.start_date}); der Plan rechnet in Arbeitstagen Mo–Fr ohne Feiertage.` : undefined
   c.header('Cache-Control', 'no-cache, no-transform')
   c.header('X-Accel-Buffering', 'no')
   return streamSSE(
     c,
     async (stream) => {
       try {
-        for await (const ev of refinePlanStream(plan, body.instruction ?? '', body.people)) await stream.writeSSE({ data: JSON.stringify(ev) })
+        for await (const ev of refinePlanStream(plan, body.instruction ?? '', body.people, { cache, context })) await stream.writeSSE({ data: JSON.stringify(ev) })
       } catch (e) {
         await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: e instanceof HttpError ? e.message : 'Die Überarbeitung ist fehlgeschlagen.' }) })
       }

@@ -163,6 +163,27 @@ async function requestStream<TDone>(path: string, body: unknown, onEvent: (ev: {
   return result
 }
 
+/**
+ * Lange KI-Aufgaben: bricht die Verbindung ab oder scheitert ein Schritt vorübergehend, wird mit
+ * derselben Auftragskennung automatisch neu verbunden - der Server liefert fertige Schritte aus
+ * seinem Zwischenspeicher und macht beim offenen Schritt weiter.
+ */
+async function requestStreamResumable<TDone>(path: string, body: Record<string, unknown>, onEvent: (ev: { type: string; [k: string]: unknown }) => void): Promise<TDone> {
+  const jobId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `job-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  const attempts = 4
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await requestStream<TDone>(path, { ...body, job_id: jobId }, onEvent)
+    } catch (e) {
+      const err = e as ApiError
+      const transient = err.status === 0 || err.status >= 500 || err.status === 429
+      if (!transient || attempt >= attempts) throw e
+      onEvent({ type: 'progress', tasks: 0, message: `Verbindung unterbrochen – es wird fortgesetzt (Versuch ${attempt + 1} von ${attempts}) …` })
+      await new Promise((r) => setTimeout(r, 2000 * attempt))
+    }
+  }
+}
+
 export interface PortfolioEntry {
   project: Project
   health: HealthStatus
@@ -434,13 +455,13 @@ export const api = {
   planImport: {
     status: () => request<{ lucidchart: { configured: boolean; note: string }; document_ai: { configured: boolean; note: string }; jira: { configured: boolean; note: string } }>('GET', '/plan-import/status'),
     lucidchart: (document: string) => request<ExtractedPlan>('POST', '/plan-import/lucidchart', { document }),
-    document: (input: { text: string; file_name?: string; hint?: string }, onProgress?: (tasks: number) => void) =>
-      requestStream<{ plan: ExtractedPlan }>('/plan-import/document', input, (ev) => { if (ev.type === 'progress') onProgress?.(Number(ev.tasks) || 0) }).then((r) => r.plan),
+    document: (input: { text: string; file_name?: string; hint?: string }, onProgress?: (tasks: number, message?: string) => void) =>
+      requestStreamResumable<{ plan: ExtractedPlan }>('/plan-import/document', input, (ev) => { if (ev.type === 'progress') onProgress?.(Number(ev.tasks) || 0, ev.message as string | undefined) }).then((r) => r.plan),
     jira: (input: { base_url?: string; email?: string; api_token?: string; project_key?: string; jql?: string }) => request<ExtractedPlan>('POST', '/plan-import/jira', input),
-    generate: (input: { brief: string; kind?: string; people?: string[]; project_id?: string }, onProgress?: (tasks: number) => void) =>
-      requestStream<{ plan: ExtractedPlan }>('/plan-import/generate', input, (ev) => { if (ev.type === 'progress') onProgress?.(Number(ev.tasks) || 0) }).then((r) => r.plan),
-    refine: (input: { plan: ExtractedPlan; instruction: string; people?: string[]; project_id?: string }, onProgress?: (tasks: number) => void) =>
-      requestStream<{ plan: ExtractedPlan }>('/plan-import/refine', input, (ev) => { if (ev.type === 'progress') onProgress?.(Number(ev.tasks) || 0) }).then((r) => r.plan),
+    generate: (input: { brief: string; kind?: string; people?: string[]; project_id?: string }, onProgress?: (tasks: number, message?: string) => void) =>
+      requestStreamResumable<{ plan: ExtractedPlan }>('/plan-import/generate', input, (ev) => { if (ev.type === 'progress') onProgress?.(Number(ev.tasks) || 0, ev.message as string | undefined) }).then((r) => r.plan),
+    refine: (input: { plan: ExtractedPlan; instruction: string; people?: string[]; project_id?: string }, onProgress?: (tasks: number, message?: string) => void) =>
+      requestStreamResumable<{ plan: ExtractedPlan }>('/plan-import/refine', input, (ev) => { if (ev.type === 'progress') onProgress?.(Number(ev.tasks) || 0, ev.message as string | undefined) }).then((r) => r.plan),
     sort: (plan: ExtractedPlan) => request<ExtractedPlan>('POST', '/plan-import/sort', { plan }),
     attach: (projectId: string, plan: ExtractedPlan, position?: { parent_id?: string | null; after_id?: string | null }) => request<{ tasks_created: number; unmatched: string[] }>('POST', `/projects/${projectId}/plan-import`, { plan, ...position }),
     preview: (projectId: string, plan: ExtractedPlan) => request<{ tasks: Task[]; dependencies: TaskDependency[]; unmatched: string[] }>('POST', `/projects/${projectId}/plan-import/preview`, { plan }),

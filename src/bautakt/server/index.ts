@@ -6,7 +6,8 @@
  */
 
 import { Hono } from 'hono'
-import { Db } from './db.ts'
+import { Db, newId, nowISO } from './db.ts'
+import { setAiLogSink } from './services/aiCore.ts'
 import { authMiddleware, HttpError, login, loginWithEmail, register, resolveSession, type AppEnv } from './auth.ts'
 import { orgRoutes } from './routes/org.ts'
 import { projectRoutes } from './routes/projects.ts'
@@ -120,6 +121,8 @@ export function getApiApp() {
     appPromise = (async () => {
       const db = new Db()
       await db.migrate(migrationFiles)
+      // Protokoll jedes KI-Aufrufs (Tabelle ai_calls) - Fehler beim Schreiben stören die eigentliche Arbeit nie
+      setAiLogSink((e) => void db.insert('ai_calls', { id: newId('ai'), created_at: nowISO(), ...e }).catch(() => {}))
       await ensureAttachmentsBucket()
       await seedBuiltinTemplates(db)
       await seedDemoOrg(db)

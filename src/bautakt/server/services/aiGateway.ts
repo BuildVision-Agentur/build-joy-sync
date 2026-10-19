@@ -42,17 +42,89 @@ export function modelId(provider: AiProvider, id: string): string {
   return id
 }
 
+/** Ausweichmodell, falls das Hauptmodell wiederholt scheitert (optional, z. B. AI_FALLBACK_MODEL=gpt-4.1). */
+export const AI_FALLBACK_MODEL = process.env['AI_FALLBACK_MODEL'] || ''
+
+const RETRY_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529])
+const MAX_ATTEMPTS = 6
+/** Parameter, die ein Modell nicht kennt, werden je Modell gemerkt und künftig weggelassen. */
+const unsupportedParams = new Map<string, Set<string>>()
+
+const sleepMs = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const t = setTimeout(resolve, ms)
+    signal?.addEventListener('abort', () => { clearTimeout(t); reject(signal.reason ?? new Error('abgebrochen')) }, { once: true })
+  })
+
+/** Wartezeit vor dem nächsten Versuch: Vorgabe des Anbieters (Retry-After bzw. „try again in 7.2s“), sonst exponentiell mit Streuung. */
+function retryDelay(attempt: number, res: Response | null, text: string): number {
+  const header = res?.headers.get('retry-after-ms') ?? null
+  if (header && Number(header) > 0) return Math.min(60_000, Number(header))
+  const after = res?.headers.get('retry-after')
+  if (after && Number(after) > 0) return Math.min(60_000, Number(after) * 1000)
+  const m = /try again in ([\d.]+)\s*(ms|s)/i.exec(text)
+  if (m) return Math.min(60_000, Number(m[1]) * (m[2]!.toLowerCase() === 'ms' ? 1 : 1000) + 250)
+  return Math.min(30_000, 1000 * 2 ** attempt) * (0.75 + Math.random() * 0.5)
+}
+
+/** Erkennt „Parameter X wird von diesem Modell nicht unterstützt“ und liefert den Parameternamen. */
+function rejectedParam(text: string, body: Record<string, unknown>): string | null {
+  if (!/unsupported|not supported|unknown parameter|unrecognized|does not support|invalid_request/i.test(text)) return null
+  // „include: reasoning.encrypted_content“ behandelt der Aufrufer selbst (Jarvis) - nicht den Denkmodus abschalten.
+  if (/encrypted_content|\binclude\b/i.test(text)) return null
+  for (const p of ['reasoning', 'max_output_tokens', 'store', 'text']) if (p in body && new RegExp(`\\b${p}\\b`, 'i').test(text)) return p
+  return null
+}
+
+/**
+ * POST an den KI-Anbieter mit automatischer Wiederholung bei Auslastung (429), Serverfehlern
+ * und Netzabbrüchen. Lehnt ein Modell einen Parameter ab (z. B. „reasoning“ bei einem Modell
+ * ohne Denkmodus), wird er für dieses Modell gemerkt und die Anfrage ohne ihn wiederholt.
+ */
 export async function aiPost(path: string, body: unknown, opts: { provider?: AiProvider; signal?: AbortSignal } = {}): Promise<Response> {
   const provider = opts.provider ?? requireAiProvider()
   const isForm = typeof FormData !== 'undefined' && body instanceof FormData
-  const res = await fetch(`${provider.baseUrl}${path}`, {
-    method: 'POST',
-    headers: isForm ? provider.headers : { ...provider.headers, 'Content-Type': 'application/json' },
-    body: isForm ? body : JSON.stringify(body),
-    signal: opts.signal,
-  })
-  if (!res.ok) throw aiError(res.status, await res.text().catch(() => ''))
-  return res
+  const json = !isForm && body && typeof body === 'object' ? { ...(body as Record<string, unknown>) } : null
+  const model = json && typeof json.model === 'string' ? json.model : ''
+  for (const p of unsupportedParams.get(model) ?? []) if (json) delete json[p]
+
+  let lastStatus = 0
+  let lastText = ''
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    let res: Response | null = null
+    try {
+      res = await fetch(`${provider.baseUrl}${path}`, {
+        method: 'POST',
+        headers: isForm ? provider.headers : { ...provider.headers, 'Content-Type': 'application/json' },
+        body: isForm ? (body as FormData) : JSON.stringify(json ?? body),
+        signal: opts.signal,
+      })
+    } catch (e) {
+      if (opts.signal?.aborted) throw e
+      lastStatus = 0
+      lastText = (e as Error).message
+      await sleepMs(retryDelay(attempt, null, ''), opts.signal)
+      continue
+    }
+    if (res.ok) return res
+    lastStatus = res.status
+    lastText = await res.text().catch(() => '')
+    if (res.status === 400 && json) {
+      const p = rejectedParam(lastText, json)
+      if (p && p !== 'text') {
+        if (!unsupportedParams.has(model)) unsupportedParams.set(model, new Set())
+        unsupportedParams.get(model)!.add(p)
+        delete json[p]
+        attempt--
+        continue
+      }
+    }
+    // 402 (Guthaben) und 401/403 sind endgültig; Wiederholen hilft nur bei vorübergehenden Fehlern.
+    if (!RETRY_STATUS.has(res.status) || attempt === MAX_ATTEMPTS - 1) break
+    await sleepMs(retryDelay(attempt, res, lastText), opts.signal)
+  }
+  if (lastStatus === 0) throw new HttpError(502, `Die KI ist gerade nicht erreichbar (${lastText.slice(0, 120)}). Bitte gleich noch einmal versuchen.`)
+  throw aiError(lastStatus, lastText)
 }
 
 export function aiError(status: number, body: string): HttpError {
