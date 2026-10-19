@@ -349,7 +349,7 @@ export function ErrorBox({ message, onRetry }: { message: string; onRetry?: () =
   )
 }
 
-export function Modal({ open, onClose, title, children, footer, width = 'md' }: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; footer?: ReactNode; width?: 'sm' | 'md' | 'lg' | 'xl' }) {
+export function Modal({ open, onClose, title, children, footer, width = 'md' }: { open: boolean; onClose: () => void; title: ReactNode; children: ReactNode; footer?: ReactNode; width?: 'sm' | 'md' | 'lg' | 'xl' | 'full' }) {
   useEffect(() => {
     if (!open) return
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
@@ -366,6 +366,7 @@ export function Modal({ open, onClose, title, children, footer, width = 'md' }: 
           width === 'md' && 'sm:max-w-xl',
           width === 'lg' && 'sm:max-w-3xl',
           width === 'xl' && 'sm:max-w-5xl',
+          width === 'full' && 'sm:max-w-[min(96vw,1440px)]',
         )}
         role="dialog"
         aria-modal

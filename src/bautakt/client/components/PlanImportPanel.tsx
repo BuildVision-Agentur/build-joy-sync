@@ -62,6 +62,9 @@ export function PlanImportPanel({
   const org = useOrg()
   const toast = useToast()
   const [modeState, setMode] = useState<PlanImportMode>('document')
+  // Überarbeiten: Ausgangsstand merken, damit neue und geänderte Zeilen sichtbar werden
+  const [baseline] = useState(() => (fixedMode === 'revise' && plan ? new Map(plan.tasks.map((t) => [t.key, rowSignature(t)])) : null))
+  const [onlyChanges, setOnlyChanges] = useState(false)
   const mode = fixedMode ?? modeState
   const [lucidInput, setLucidInput] = useState('')
   const [hint, setHint] = useState('')
@@ -150,6 +153,27 @@ export function PlanImportPanel({
   }
 
   const nameByKey = new Map((plan?.tasks ?? []).map((t) => [t.key, t.name]))
+  const byKey = new Map((plan?.tasks ?? []).map((t) => [t.key, t]))
+  const depthOf = (t: ExtractedTask) => {
+    let d = 0
+    let p = t.parent_key ? byKey.get(t.parent_key) : undefined
+    while (p && d < 8) {
+      d++
+      p = p.parent_key ? byKey.get(p.parent_key) : undefined
+    }
+    return d
+  }
+  const changeOf = (t: ExtractedTask): 'new' | 'changed' | null => {
+    if (!baseline) return null
+    const before = baseline.get(t.key)
+    if (before === undefined) return 'new'
+    return before === rowSignature(t) ? null : 'changed'
+  }
+  const rows = (plan?.tasks ?? []).map((t, i) => ({ t, i, change: changeOf(t) }))
+  const added = rows.filter((r) => r.change === 'new').length
+  const changed = rows.filter((r) => r.change === 'changed').length
+  const removedCount = baseline && plan ? [...baseline.keys()].filter((k) => !byKey.has(k)).length : 0
+  const visible = onlyChanges ? rows.filter((r) => r.change) : rows
 
   return (
     <div className="space-y-4">
@@ -239,9 +263,29 @@ export function PlanImportPanel({
             </div>
           )}
 
-          <div className="overflow-x-auto rounded-lg border border-line">
-            <table className="w-full text-sm">
-              <thead className="bg-surface-2 text-xs text-ink-faint">
+          {baseline && (
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="text-ink-faint">Änderungen gegenüber dem aktuellen Plan:</span>
+              <span className="rounded-full bg-ok-soft px-2 py-0.5 font-medium text-ok">{added} neu</span>
+              <span className="rounded-full bg-brand-soft px-2 py-0.5 font-medium text-brand">{changed} geändert</span>
+              {removedCount > 0 && <span className="rounded-full bg-danger-soft px-2 py-0.5 font-medium text-danger">{removedCount} entfernt</span>}
+              <label className="ml-auto inline-flex cursor-pointer items-center gap-1.5 text-sm">
+                <input type="checkbox" className="accent-brand" checked={onlyChanges} onChange={(e) => setOnlyChanges(e.target.checked)} disabled={!added && !changed} /> Nur Änderungen anzeigen
+              </label>
+            </div>
+          )}
+          <div className="max-h-[60vh] overflow-auto rounded-lg border border-line">
+            <table className="w-full min-w-[960px] table-fixed text-sm">
+              <colgroup>
+                <col className="w-[76px]" />
+                <col />
+                <col className="w-[132px]" />
+                <col className="w-[88px]" />
+                <col className="w-[170px]" />
+                <col className="w-[220px]" />
+                <col className="w-[48px]" />
+              </colgroup>
+              <thead className="sticky top-0 z-10 bg-surface-2 text-xs text-ink-faint">
                 <tr>
                   <th className="p-2 text-left">Reihenfolge</th>
                   <th className="p-2 text-left">Aufgabe</th>
@@ -253,16 +297,23 @@ export function PlanImportPanel({
                 </tr>
               </thead>
               <tbody>
-                {plan.tasks.map((t, i) => (
-                  <tr key={t.key} className="border-t border-line align-top">
+                {visible.map(({ t, i, change }) => (
+                  <tr key={t.key} className={`border-t border-line align-top ${change === 'new' ? 'bg-ok-soft/50' : change === 'changed' ? 'bg-brand-soft/40' : ''}`}>
                     <td className="p-2">
                       <div className="flex gap-1">
-                        <Button size="sm" variant="ghost" disabled={i === 0} onClick={() => move(i, -1)} title="Nach oben"><ArrowUp size={14} /></Button>
-                        <Button size="sm" variant="ghost" disabled={i === plan.tasks.length - 1} onClick={() => move(i, 1)} title="Nach unten"><ArrowDown size={14} /></Button>
+                        <Button size="sm" variant="ghost" disabled={i === 0 || onlyChanges} onClick={() => move(i, -1)} title="Nach oben"><ArrowUp size={14} /></Button>
+                        <Button size="sm" variant="ghost" disabled={i === plan.tasks.length - 1 || onlyChanges} onClick={() => move(i, 1)} title="Nach unten"><ArrowDown size={14} /></Button>
                       </div>
                     </td>
-                    <td className="p-2" style={{ paddingLeft: t.parent_key ? 22 : undefined }}>
-                      <Input value={t.name} onChange={(e) => patch(t.key, { name: e.target.value })} />
+                    <td className="p-2" style={{ paddingLeft: 8 + depthOf(t) * 18 }}>
+                      <Textarea
+                        dictate={false}
+                        rows={Math.min(4, Math.max(1, Math.ceil(t.name.length / 70)))}
+                        className={`resize-none py-1.5 leading-snug ${t.type === 'phase' || t.type === 'group' ? 'font-semibold' : ''}`}
+                        value={t.name}
+                        title={t.notes || t.name}
+                        onChange={(e) => patch(t.key, { name: e.target.value.replace(/\n/g, ' ') })}
+                      />
                     </td>
                     <td className="p-2">
                       <Select value={t.type} onChange={(e) => patch(t.key, { type: e.target.value as TaskType })}>
@@ -270,7 +321,7 @@ export function PlanImportPanel({
                       </Select>
                     </td>
                     <td className="p-2">
-                      <Input type="number" min={0} value={t.type === 'milestone' ? 0 : (t.duration ?? 1)} disabled={t.type === 'milestone'} onChange={(e) => patch(t.key, { duration: Math.max(0, Number(e.target.value) || 0) })} />
+                      <Input dictate={false} type="number" min={0} value={t.type === 'milestone' ? 0 : (t.duration ?? 1)} disabled={t.type === 'milestone'} onChange={(e) => patch(t.key, { duration: Math.max(0, Number(e.target.value) || 0) })} />
                     </td>
                     <td className="p-2">
                       <Select value={t.responsible ?? ''} onChange={(e) => patch(t.key, { responsible: e.target.value || null })}>
@@ -279,16 +330,26 @@ export function PlanImportPanel({
                         {people.map((u) => <option key={u.id} value={u.email}>{u.name}</option>)}
                       </Select>
                     </td>
-                    <td className="p-2 text-xs text-ink-soft">{(t.depends_on ?? []).map((d) => nameByKey.get(d.predecessor_key)).filter(Boolean).join(', ') || '–'}</td>
+                    <td className="p-2 text-xs text-ink-soft">
+                      {(() => {
+                        const names = (t.depends_on ?? []).map((d) => nameByKey.get(d.predecessor_key)).filter(Boolean).join(', ')
+                        return <span className="line-clamp-3" title={names}>{names || '–'}</span>
+                      })()}
+                    </td>
                     <td className="p-2"><Button size="sm" variant="ghost" onClick={() => remove(t.key)}><Trash2 size={14} /></Button></td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-          <p className="text-xs text-ink-faint">{plan.tasks.length} Zeilen. Mit den Pfeilen verschiebst du eine Zeile; bei einer Phase wandern ihre Vorgänge mit. Personen werden über Name oder E-Mail dem Team zugeordnet.</p>
+          <p className="text-xs text-ink-faint">{plan.tasks.length} Zeilen{onlyChanges ? ` (angezeigt: ${visible.length} geänderte/neue)` : ''}. Mit den Pfeilen verschiebst du eine Zeile; bei einer Phase wandern ihre Vorgänge mit. Personen werden über Name oder E-Mail dem Team zugeordnet.</p>
         </div>
       )}
     </div>
   )
+}
+
+/** Inhalt einer Zeile, an dem eine Änderung erkannt wird (Name, Art, Dauer, Ebene, Person, Vorgänger, fester Start). */
+function rowSignature(t: ExtractedTask): string {
+  return JSON.stringify([t.name, t.type, t.type === 'milestone' ? 0 : t.duration, t.parent_key ?? null, t.responsible ?? null, t.start_no_earlier ?? null, (t.depends_on ?? []).map((d) => `${d.predecessor_key}:${d.type ?? 'FS'}:${d.lag_days ?? 0}`).sort()])
 }

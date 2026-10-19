@@ -50,7 +50,7 @@ export function PlanReviseDialog({ onClose }: { onClose: () => void }) {
       open
       onClose={onClose}
       title="Gesamten Plan überarbeiten"
-      width="xl"
+      width="full"
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Abbrechen</Button>
