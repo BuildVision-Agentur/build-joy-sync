@@ -35,9 +35,10 @@ const DEP_SCHEMA = {
 const OP_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['op', 'key', 'name', 'type', 'parent_key', 'after_key', 'duration', 'work_hours', 'hours_per_day', 'days_per_week', 'start_no_earlier', 'responsible', 'notes', 'predecessor_key', 'dep_type', 'lag_days', 'depends_on'],
+  required: ['op', 'req', 'key', 'name', 'type', 'parent_key', 'after_key', 'duration', 'work_hours', 'hours_per_day', 'days_per_week', 'start_no_earlier', 'responsible', 'notes', 'predecessor_key', 'dep_type', 'lag_days', 'depends_on'],
   properties: {
     op: { type: 'string', enum: ['add', 'update', 'remove', 'move', 'link', 'unlink'], description: 'add = neuer Vorgang; update = Felder ändern; remove = entfernen; move = an andere Stelle/unter andere Phase; link/unlink = Abhängigkeit setzen/lösen' },
+    req: { type: ['string', 'null'], description: 'Kennung der Anforderung (R1, R2, …), die diese Operation umsetzt. Immer angeben.' },
     key: { type: ['string', 'null'], description: 'add: NEUER eindeutiger Schlüssel (n1, n2, …). update/remove/move: Schlüssel des bestehenden Vorgangs (v…). link/unlink: der NACHFOLGER.' },
     name: { type: ['string', 'null'], description: 'add: Bezeichnung (Pflicht). update: neue Bezeichnung oder null = unverändert.' },
     type: { type: ['string', 'null'], enum: ['phase', 'group', 'task', 'milestone', null], description: 'add: Art (Standard task). update: neue Art oder null.' },
@@ -60,9 +61,14 @@ const OP_SCHEMA = {
 const EDIT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['operations', 'warnings', 'complete'],
+  required: ['operations', 'no_change_needed', 'warnings', 'complete'],
   properties: {
     operations: { type: 'array', items: OP_SCHEMA },
+    no_change_needed: {
+      type: 'array',
+      description: 'Anforderungen, die keine Planänderung brauchen (z. B. reine Information, schon im Plan enthalten) - mit kurzer Begründung.',
+      items: { type: 'object', additionalProperties: false, required: ['id', 'reason'], properties: { id: { type: 'string' }, reason: { type: 'string' } } },
+    },
     warnings: { type: 'array', items: { type: 'string' }, description: 'Kurze Hinweise: getroffene Annahmen, Rechenwege, offene Fragen, ergänzte Punkte.' },
     complete: { type: 'boolean', description: 'true, wenn alle Änderungen für diesen Teil der Anweisung enthalten sind. false, wenn noch Änderungen fehlen (Antwort wäre sonst zu lang) - du wirst dann zum Weitermachen aufgefordert.' },
   },
@@ -79,6 +85,7 @@ const LOCATE_SCHEMA = {
 
 export interface PlanOp {
   op: 'add' | 'update' | 'remove' | 'move' | 'link' | 'unlink'
+  req?: string | null
   key: string | null
   name: string | null
   type: TaskType | null
@@ -97,7 +104,7 @@ export interface PlanOp {
   depends_on: { predecessor_key: string; type: 'FS' | 'SS' | 'FF' | 'SF'; lag_days: number }[]
 }
 
-interface EditResponse { operations?: PlanOp[]; warnings?: string[]; complete?: boolean }
+interface EditResponse { operations?: PlanOp[]; no_change_needed?: { id: string; reason: string }[]; warnings?: string[]; complete?: boolean }
 
 const OPS_PER_RESPONSE = 80
 const INSTRUCTION_CHUNK_CHARS = 8_000
@@ -111,7 +118,9 @@ Planansicht (eine Zeile je Vorgang): key | Art | übergeordnet | Dauer AT | vera
 Vorgänger-Schreibweise: v7 = Ende→Start; v7:SS+2 = Start→Start mit 2 AT Abstand.
 
 Regeln:
-- Setze die Anweisung VOLLSTÄNDIG um - jede genannte Aufgabe, Phase, Zeitangabe, Reihenfolge und jeder Termin. Der Nutzer erwartet, dass nichts fehlt.
+- Du bekommst die Anweisung zusätzlich als nummerierte ANFORDERUNGEN (R1, R2, …). Setze jede OFFENE Anforderung vollständig um und nenne bei jeder Operation in req die Anforderung, die sie umsetzt. Braucht eine Anforderung keine Planänderung, führe sie in no_change_needed mit Begründung auf. Der Nutzer erwartet, dass nichts fehlt - eine einzelne Operation für eine lange Anweisung ist fast immer zu wenig.
+- Anforderungen mit Mengen (z. B. „jedes Modul“, „alle Wege“, „pro Modul 2 Tage“) bedeuten je Modul/Weg einen eigenen Vorgang bzw. eine eigene Berechnung - nicht eine Sammelposition.
+- Stehen FAKTEN im Auftrag (z. B. KLIM-Tabelle mit Lektionen und Sprechzeit je Modul und Weg), rechne mit genau diesen Zahlen. Schätze nur, wo die Fakten nichts hergeben, und sage das in warnings.
 - Ändere nur, was die Anweisung betrifft oder was zwingend daraus folgt. Bestehende Vorgänge nicht umbenennen oder umsortieren, wenn es nicht verlangt ist.
 - Neue Vorgänge (op add) bekommen neue Schlüssel n1, n2, … (nie einen v-Schlüssel) und eine sinnvolle Stelle (parent_key, after_key). Neue Phasen zuerst anlegen, dann ihre Vorgänge mit parent_key = Schlüssel der neuen Phase.
 - Zeitberechnungen aus Stunden (z. B. Aufnahmezeit, Schnitt = Vielfaches der Aufnahmezeit) gibst du als work_hours (+ hours_per_day, days_per_week) an - das Programm rechnet die Arbeitstage exakt aus. Schreibe deine Herleitung kurz in notes (z. B. „S-Weg Finanzen: 95 Min Sprechzeit = 1,6 Std.“).
@@ -454,6 +463,37 @@ function summarizeOps(ops: PlanOp[]): string {
   }).join('\n')
 }
 
+// ---------------------------------------------------------------- Anforderungsliste
+const REQ_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['requirements'],
+  properties: {
+    requirements: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'text'],
+        properties: {
+          id: { type: 'string', description: 'R1, R2, … fortlaufend' },
+          text: { type: 'string', description: 'Ein einzelner, konkreter Punkt der Anweisung in einem Satz - mit allen Zahlen, Daten, Namen und Bedingungen daraus.' },
+        },
+      },
+    },
+  },
+} as const
+
+const SYSTEM_REQ = `Du zerlegst eine Änderungsanweisung für einen Projektplan in eine vollständige Liste einzelner Anforderungen.
+- Jeder eigenständige Punkt wird eine Anforderung: jede zu ergänzende oder zu ändernde Aufgabe/Phase, jede Berechnung (z. B. Aufnahmedauer, Schnittdauer), jede Reihenfolge, jeder Termin, jede Regel (z. B. Arbeitszeit pro Tag/Woche), jede Abhängigkeit („soll anfangen, wenn …“).
+- Aufzählungen in einem Satz („Sprechertexte formulieren, Dopplungen raus, Lücken beheben, …“) werden in einzelne Anforderungen aufgeteilt.
+- Wiederholt sich die Anweisung wörtlich, jeden Punkt nur einmal aufnehmen.
+- Bittet die Anweisung um eigene Ergänzungen („falls dir noch etwas einfällt“), füge 2-6 fachlich wichtige, konkrete Ergänzungen als eigene Anforderungen hinzu und beginne ihren Text mit „Ergänzung:“.
+- Formuliere jede Anforderung so, dass sie für sich allein verständlich und prüfbar ist (Zahlen, Daten, Namen übernehmen).
+- Antworte im JSON-Schema, auf Deutsch.`
+
+interface Requirement { id: string; text: string }
+
 // ---------------------------------------------------------------- Ablauf
 export type EditProgress = { type: 'progress'; tasks: number; message?: string }
 
@@ -461,13 +501,22 @@ export interface EditOptions {
   people?: string[]
   /** Bekannte Fakten, die der Plan nicht enthält (z. B. heutiges Datum, Projektstart) */
   context?: string
+  /** Verbindliches Fachwissen (z. B. KLIM-Faktentabelle) - statt Schätzungen zu verwenden */
+  facts?: string
   cache?: StepCache
   label?: string
 }
 
+const MAX_STALL_ROUNDS = 2
+
 /**
- * Überarbeitet einen Plan nach einer beliebig langen Anweisung. Liefert den vollständigen neuen
- * Plan (unveränderte Vorgänge exakt erhalten) samt Hinweisen, was geändert wurde.
+ * Überarbeitet einen Plan nach einer beliebig langen Anweisung:
+ *   1. Anweisung in nummerierte Einzelanforderungen zerlegen (R1, R2, …)
+ *   2. Änderungen in Runden planen; jede Operation nennt ihre Anforderung
+ *   3. Das Programm prüft die Abdeckung selbst und fordert offene Anforderungen nach -
+ *      die KI kann nicht „fertig“ melden, solange Punkte fehlen
+ * Liefert den vollständigen neuen Plan (unveränderte Vorgänge exakt erhalten) und je
+ * Anforderung, was umgesetzt wurde.
  */
 export async function* editPlanStream(plan: ExtractedPlan, instruction: string, opts: EditOptions = {}): AsyncGenerator<EditProgress | { type: 'done'; plan: ExtractedPlan }> {
   const text = instruction.trim()
@@ -476,40 +525,64 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
   const peopleLine = opts.people?.length ? `\nPersonenliste (nur diese als responsible): ${opts.people.join('; ')}` : ''
   const today = new Date().toISOString().slice(0, 10)
   const contextLine = `\nHeute: ${today}.${opts.context ? ` ${opts.context}` : ''}`
+  const factsBlock = opts.facts ? `\n\nFAKTEN (verbindlich - rechne mit diesen Zahlen, schätze nicht):\n${opts.facts}` : ''
   const parts = splitInstruction(text)
   const total: ApplyStats = { added: 0, updated: 0, removed: 0, moved: 0, linked: 0, unlinked: 0 }
   const notes: string[] = []
+  const report: string[] = []
   let current = plan
-  const baseHash = stepHash(JSON.stringify(plan.tasks.map((t) => [t.key, t.name, t.parent_key, t.duration])) + text)
+  const baseHash = stepHash(JSON.stringify(plan.tasks.map((t) => [t.key, t.name, t.parent_key, t.duration])) + text + (opts.facts ?? ''))
+  const changed = () => total.added + total.updated + total.removed + total.moved + total.linked
 
   for (let pi = 0; pi < parts.length; pi++) {
     const part = parts[pi]!
     const partLabel = parts.length > 1 ? `Teil ${pi + 1} von ${parts.length}` : ''
+    const prefix = partLabel ? `${partLabel}: ` : ''
+
+    // 1) Anforderungen
+    yield { type: 'progress', tasks: changed(), message: `${prefix}Anweisung wird in Einzelpunkte zerlegt …` }
+    const reqRes = await cachedStep(opts.cache, `${baseHash}:req:${pi}`, () =>
+      aiJson<{ requirements: Requirement[] }>({ label: `${label}: Anforderungen${partLabel ? ` ${partLabel}` : ''}`, system: SYSTEM_REQ, user: `Anweisung${partLabel ? ` (${partLabel})` : ''}:\n${part}${contextLine}`, schema: REQ_SCHEMA, schemaName: 'anforderungen', effort: 'medium', maxOutputTokens: 12_000 }),
+    )
+    const reqs: Requirement[] = (reqRes.requirements ?? []).filter((r) => r?.text?.trim()).map((r, i) => ({ id: `${pi > 0 ? `T${pi + 1}` : ''}R${i + 1}`, text: r.text.trim() }))
+    if (!reqs.length) reqs.push({ id: 'R1', text: part.slice(0, 2000) })
+    const covered = new Map<string, string[]>() // Anforderung → Kurzbeschreibung der Änderungen
+    const noChange = new Map<string, string>()
+    const reqIds = new Map(reqs.map((r) => [r.id.toUpperCase(), r.id]))
+    // Die KI nummeriert R1, R2 …; bei mehreren Teilen auf die Teil-Kennung abbilden
+    const reqOf = (raw: string | null | undefined): string | null => {
+      if (!raw) return null
+      const k = raw.trim().toUpperCase()
+      return reqIds.get(k) ?? reqIds.get(`${pi > 0 ? `T${pi + 1}` : ''}${k}`) ?? null
+    }
+
+    // 2) Änderungen in Runden, bis jede Anforderung abgedeckt ist
     let opsSoFar: PlanOp[] = []
     let rounds = 0
+    let stall = 0
     let opLimit = OPS_PER_RESPONSE
     for (;;) {
+      const open = reqs.filter((r) => !covered.has(r.id) && !noChange.has(r.id))
+      if (!open.length) break
       rounds++
-      if (rounds > MAX_ROUNDS_PER_CHUNK) {
-        notes.push(`${partLabel || 'Anweisung'}: nach ${MAX_ROUNDS_PER_CHUNK} Runden beendet - bitte prüfen, ob alles umgesetzt ist.`)
-        break
-      }
-      yield { type: 'progress', tasks: total.added + total.updated + total.removed + total.moved, message: `${partLabel ? `${partLabel}: ` : ''}${rounds === 1 ? 'Änderungen werden geplant …' : `weitere Änderungen (Runde ${rounds}) …`}` }
+      if (rounds > MAX_ROUNDS_PER_CHUNK || stall >= MAX_STALL_ROUNDS) break
+      yield { type: 'progress', tasks: changed(), message: `${prefix}${reqs.length - open.length} von ${reqs.length} Punkten umgesetzt – ${rounds === 1 ? 'Änderungen werden geplant …' : `Runde ${rounds} …`}` }
 
       // Große Pläne: zuerst die betroffenen Bereiche bestimmen
       let view = buildView(current)
       if (view.text.length > VIEW_LIMIT_CHARS) {
         const outline = outlineView(current)
         const loc = await cachedStep(opts.cache, `${baseHash}:locate:${pi}:${rounds}`, () =>
-          aiJson<{ areas: string[] }>({ label: `${label}: Bereiche bestimmen`, system: SYSTEM_LOCATE, user: `Anweisung (${partLabel || 'vollständig'}):\n${part}\n\n${outline.text}`, schema: LOCATE_SCHEMA, schemaName: 'bereiche', effort: 'low', maxOutputTokens: 4_000 }),
+          aiJson<{ areas: string[] }>({ label: `${label}: Bereiche bestimmen`, system: SYSTEM_LOCATE, user: `Anforderungen:\n${open.map((r) => `${r.id}: ${r.text}`).join('\n')}\n\n${outline.text}`, schema: LOCATE_SCHEMA, schemaName: 'bereiche', effort: 'low', maxOutputTokens: 4_000 }),
         )
         const focus = new Set((loc.areas ?? []).map((k) => outline.aliasToKey.get(k.trim())).filter((k): k is string => !!k))
         view = buildView(current, focus.size ? focus : undefined)
       }
 
-      const already = opsSoFar.length ? `\n\nBereits umgesetzt für diesen Teil (NICHT wiederholen, im Plan oben schon enthalten):\n${summarizeOps(opsSoFar)}\n\nSetze jetzt die noch fehlenden Änderungen um.` : ''
+      const checklist = reqs.map((r) => `${covered.has(r.id) || noChange.has(r.id) ? '[erledigt]' : '[OFFEN]'} ${r.id}: ${r.text}`).join('\n')
+      const already = opsSoFar.length ? `\n\nBereits umgesetzte Änderungen (NICHT wiederholen, im Plan oben schon enthalten):\n${summarizeOps(opsSoFar)}` : ''
       const earlier = pi > 0 ? `\n\nFrühere Teile der Anweisung sind bereits umgesetzt und im Plan enthalten.` : ''
-      const user = `Anweisung${partLabel ? ` (${partLabel})` : ''}:\n${part}${peopleLine}${contextLine}${earlier}\n\nHöchstens ${opLimit} Operationen in dieser Antwort.\n\n${view.text}${already}`
+      const user = `Anweisung${partLabel ? ` (${partLabel})` : ''}:\n${part}${peopleLine}${contextLine}${earlier}${factsBlock}\n\nANFORDERUNGEN - setze jetzt alle OFFENEN um (jede Operation nennt in req ihre Anforderung; Punkte ohne nötige Planänderung in no_change_needed):\n${checklist}\n\nHöchstens ${opLimit} Operationen in dieser Antwort.\n\n${view.text}${already}`
 
       let res: EditResponse
       try {
@@ -523,7 +596,7 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
           rounds--
           continue
         }
-        throw e instanceof HttpError ? new HttpError(e.status, `${partLabel ? `${partLabel}: ` : ''}${e.message}`) : e
+        throw e instanceof HttpError ? new HttpError(e.status, `${prefix}${e.message}`) : e
       }
 
       const ops = Array.isArray(res.operations) ? res.operations : []
@@ -531,13 +604,36 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
       current = applied.plan
       for (const k of Object.keys(total) as (keyof ApplyStats)[]) total[k] += applied.stats[k]
       for (const w of [...(res.warnings ?? []), ...applied.warnings]) if (w && !notes.includes(w)) notes.push(w)
-      // Neue Schlüssel aus dieser Runde sind jetzt echte Vorgänge (v-Kennungen in der nächsten Ansicht)
+      const openBefore = open.length
+      for (const o of ops) {
+        const r = reqOf(o.req)
+        if (!r) continue
+        const list = covered.get(r) ?? []
+        list.push(o.op === 'add' ? `neu „${o.name ?? ''}“` : o.op === 'link' ? 'Abhängigkeit' : o.op === 'remove' ? 'entfernt' : o.op === 'move' ? 'verschoben' : `geändert${o.name ? ` „${o.name}“` : ''}`)
+        covered.set(r, list)
+      }
+      for (const n of res.no_change_needed ?? []) {
+        const r = reqOf(n.id)
+        if (r && !covered.has(r)) noChange.set(r, n.reason || 'keine Planänderung nötig')
+      }
+      // Operationen ohne Zuordnung zählen nicht als Abdeckung - aber als Fortschritt, falls sonst nichts passiert
+      const openAfter = reqs.filter((r) => !covered.has(r.id) && !noChange.has(r.id)).length
+      stall = openAfter < openBefore ? 0 : stall + 1
       opsSoFar = opsSoFar.concat(ops.map((o) => ({ ...o })))
-      if (res.complete !== false || !ops.length) break
+    }
+
+    // 3) Bericht je Anforderung
+    for (const r of reqs) {
+      const c = covered.get(r.id)
+      if (c) report.push(`✓ ${r.text} – ${c.length > 4 ? `${c.slice(0, 4).join(', ')} und ${c.length - 4} weitere` : c.join(', ')}`)
+      else if (noChange.has(r.id)) report.push(`○ ${r.text} – ${noChange.get(r.id)}`)
+      else report.push(`✗ NICHT umgesetzt: ${r.text} – bitte gezielt nachfordern`)
     }
   }
 
-  const next = normalizeExtractedPlan({ ...current, warnings: [`KI-Überarbeitung: ${describeStats(total)}.`, ...notes] }, { source: plan.source, name: plan.name, reference: plan.reference })
+  const missing = report.filter((r) => r.startsWith('✗')).length
+  const head = `KI-Überarbeitung: ${describeStats(total)}. ${report.length - missing} von ${report.length} Punkten der Anweisung umgesetzt${missing ? `, ${missing} offen` : ''}.`
+  const next = normalizeExtractedPlan({ ...current, warnings: [head, ...report, ...notes] }, { source: plan.source, name: plan.name, reference: plan.reference })
   if (!next.tasks.length) throw new HttpError(422, 'Nach der Überarbeitung ist der Plan leer - es wurde nichts übernommen.')
   yield { type: 'done', plan: next }
 }

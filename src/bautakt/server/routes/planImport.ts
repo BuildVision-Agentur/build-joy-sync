@@ -16,6 +16,7 @@ import { extractPlanFromTextStream, generatePlanFromBriefStream, refinePlanStrea
 import { getAiProvider } from '../services/aiGateway.ts'
 import { dbStepCache, pruneAiTables } from '../services/aiStepCache.ts'
 import { formatDate } from '../../shared/engine/dates.ts'
+import { hatKlimBezug, klimFaktenText } from '../../shared/templates/klim-fakten.ts'
 import { fetchLucidPlan, lucidConfigured } from '../services/lucidService.ts'
 import { jiraToExtractedPlan, type JiraSearchResponse } from '../../shared/integrations/jira/adapter.ts'
 import { normalizeExtractedPlan, type ExtractedPlan } from '../../shared/integrations/planextract/types.ts'
@@ -151,6 +152,9 @@ planImportRoutes.post('/plan-import/refine', requireCap('project.create'), async
   const plan = normalizeExtractedPlan(body.plan, { source: body.plan?.source ?? 'document' })
   // Projektbezug für Datumsangaben in der Anweisung ("ab 9.11.", "Ende November")
   const project = body.project_id ? await new Repo(c.get('db')).project(c.get('session').org.id, body.project_id) : undefined
+  // KLIM-Wissen mitgeben, wenn das Projekt aus einer KLIM-Vorlage stammt oder Anweisung/Plan KLIM-Bezug haben
+  const klimLinked = project ? !!(await c.get('db').get('SELECT id FROM project_klim_links WHERE project_id = ?', project.id)) : false
+  const facts = klimLinked || hatKlimBezug(`${body.instruction ?? ''} ${plan.name} ${plan.tasks.slice(0, 200).map((t) => t.name).join(' ')}`) ? klimFaktenText() : undefined
   const context = project ? `Projekt „${project.name}“, Projektstart ${formatDate(project.start_date)} (${project.start_date}); der Plan rechnet in Arbeitstagen Mo–Fr ohne Feiertage.` : undefined
   c.header('Cache-Control', 'no-cache, no-transform')
   c.header('X-Accel-Buffering', 'no')
@@ -158,7 +162,7 @@ planImportRoutes.post('/plan-import/refine', requireCap('project.create'), async
     c,
     async (stream) => {
       try {
-        for await (const ev of refinePlanStream(plan, body.instruction ?? '', body.people, { cache, context })) await stream.writeSSE({ data: JSON.stringify(ev) })
+        for await (const ev of refinePlanStream(plan, body.instruction ?? '', body.people, { cache, context, facts })) await stream.writeSSE({ data: JSON.stringify(ev) })
       } catch (e) {
         await stream.writeSSE({ data: JSON.stringify({ type: 'error', message: e instanceof HttpError ? e.message : 'Die Überarbeitung ist fehlgeschlagen.' }) })
       }

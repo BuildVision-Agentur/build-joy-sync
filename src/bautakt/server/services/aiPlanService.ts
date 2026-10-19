@@ -506,8 +506,8 @@ export async function* generatePlanFromBriefStream(brief: string, context?: { ki
 }
 
 /** Bestehenden Plan nach Anweisung überarbeiten - beliebig große Pläne und Anweisungen (Änderungslisten, siehe aiPlanEdit). */
-export async function* refinePlanStream(plan: ExtractedPlan, instruction: string, people?: string[], opts: AiRunOptions & { context?: string } = {}): AsyncGenerator<PlanProgress | { type: 'done'; plan: ExtractedPlan }> {
-  yield* editPlanStream(plan, instruction, { people, cache: opts.cache, context: opts.context })
+export async function* refinePlanStream(plan: ExtractedPlan, instruction: string, people?: string[], opts: AiRunOptions & { context?: string; facts?: string } = {}): AsyncGenerator<PlanProgress | { type: 'done'; plan: ExtractedPlan }> {
+  yield* editPlanStream(plan, instruction, { people, cache: opts.cache, context: opts.context, facts: opts.facts })
 }
 
 /** Reihenfolge eines Plans sinnvoll sortieren (Inhalte bleiben unverändert; die KI liefert nur die Schlüsselreihenfolge). */
