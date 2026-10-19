@@ -47,9 +47,14 @@ export class BatchExpectationError extends Error {
 export class Db {
   async all<T = Row>(query: string, ...values: SQLInputValue[]): Promise<T[]> {
     const client = await admin()
-    const { data, error } = await client.rpc('bautakt_query', { q: query, p: params(values) })
-    if (error) throw new Error(`Datenbankfehler: ${error.message} — ${query}`)
-    return (data as T[]) ?? []
+    // Lesezugriffe bei kurzzeitigen Verbindungsabbrüchen ("fetch failed") bis zu 2x wiederholen
+    for (let attempt = 0; ; attempt++) {
+      const { data, error } = await client.rpc('bautakt_query', { q: query, p: params(values) })
+      if (!error) return (data as T[]) ?? []
+      const transient = /fetch failed|aborted|ECONNRESET|network/i.test(error.message)
+      if (!transient || attempt >= 2) throw new Error(`Datenbankfehler: ${error.message} — ${query}`)
+      await new Promise((r) => setTimeout(r, 300 * (attempt + 1)))
+    }
   }
 
   async get<T = Row>(query: string, ...values: SQLInputValue[]): Promise<T | undefined> {
