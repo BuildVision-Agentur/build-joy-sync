@@ -489,7 +489,7 @@ const REQ_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['id', 'text', 'items', 'count'],
+        required: ['id', 'text', 'items', 'count', 'days_each'],
         properties: {
           id: { type: 'string', description: 'R1, R2, … fortlaufend' },
           text: { type: 'string', description: 'Ein einzelner, konkreter Punkt der Anweisung in einem Satz - mit allen Zahlen, Daten, Namen und Bedingungen daraus.' },
@@ -499,14 +499,16 @@ const REQ_SCHEMA = {
             items: {
               type: 'object',
               additionalProperties: false,
-              required: ['text', 'count'],
+              required: ['text', 'count', 'days_each'],
               properties: {
                 text: { type: 'string', description: 'Das Element als eigenständiger Auftrag (z. B. „Entscheidungstisch für jedes Modul entwickeln“)' },
                 count: { type: ['integer', 'null'], description: 'Wie viele getrennte Vorgänge verlangt sind („für jedes Modul“ bei 11 Modulen → 11), sonst null' },
+                days_each: { type: ['number', 'null'], description: 'Vorgegebene Dauer in Arbeitstagen je Vorgang, wenn die Anweisung sie nennt (z. B. „pro Modul 2 Tage“ → 2), sonst null' },
               },
             },
           },
           count: { type: ['integer', 'null'], description: 'Wie viele getrennte Vorgänge dieser Punkt verlangt („pro Modul“, „für jedes Modul“, „je Weg“ → Anzahl laut Fakten/Plan), sonst null' },
+          days_each: { type: ['number', 'null'], description: 'Vorgegebene Dauer in Arbeitstagen je Vorgang, wenn die Anweisung sie nennt (z. B. „pro Modul 2 Tage Vorbereitung“ → 2), sonst null' },
         },
       },
     },
@@ -516,14 +518,14 @@ const REQ_SCHEMA = {
 const SYSTEM_REQ = `Du zerlegst eine Änderungsanweisung für einen Projektplan in eine vollständige Liste einzelner Anforderungen.
 - Jeder eigenständige Punkt wird eine Anforderung: jede zu ergänzende oder zu ändernde Aufgabe/Phase, jede Berechnung (z. B. Aufnahmedauer, Schnittdauer), jede Reihenfolge, jeder Termin, jede Regel (z. B. Arbeitszeit pro Tag/Woche), jede Abhängigkeit („soll anfangen, wenn …“).
 - Aufzählungen in einem Satz („Sprechertexte formulieren, Dopplungen raus, Lücken beheben, …“): jedes Element einzeln in items.
-- „für jedes Modul“, „pro Modul“, „je Weg“: in count die Anzahl der getrennten Vorgänge angeben (Anzahl laut FAKTEN bzw. Plan, z. B. 11 Module der Wirbelsäule).
+- „für jedes Modul“, „pro Modul“, „je Weg“: in count die Anzahl der getrennten Vorgänge angeben (Anzahl laut FAKTEN bzw. Plan, z. B. 11 Module der Wirbelsäule). Nennt die Anweisung eine Dauer je Einheit („pro Modul 2 Tage“), diese in days_each.
 - Wiederholt sich die Anweisung wörtlich, jeden Punkt nur einmal aufnehmen.
 - Bittet die Anweisung um eigene Ergänzungen („falls dir noch etwas einfällt“), füge 2-6 fachlich wichtige, konkrete Ergänzungen als eigene Anforderungen hinzu und beginne ihren Text mit „Ergänzung:“.
 - Formuliere jede Anforderung so, dass sie für sich allein verständlich und prüfbar ist (Zahlen, Daten, Namen übernehmen).
 - Antworte im JSON-Schema, auf Deutsch.`
 
-interface Requirement { id: string; text: string; count?: number | null }
-interface RawRequirement { id: string; text: string; items?: { text: string; count: number | null }[]; count?: number | null }
+interface Requirement { id: string; text: string; count?: number | null; daysEach?: number | null }
+interface RawRequirement { id: string; text: string; items?: { text: string; count: number | null; days_each?: number | null }[]; count?: number | null; days_each?: number | null }
 
 // ---------------------------------------------------------------- Ablauf
 export type EditProgress = { type: 'progress'; tasks: number; message?: string }
@@ -581,8 +583,9 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
     const clampCount = (n: number | null | undefined) => (n && n > 1 ? Math.min(60, Math.round(n)) : null)
     const reqs: Requirement[] = (reqRes.requirements ?? []).filter((r) => r?.text?.trim()).flatMap((r, i) => {
       const items = (r.items ?? []).filter((it) => it?.text?.trim())
-      if (items.length >= 2) return items.map((it, k) => ({ id: `${tp}R${i + 1}.${k + 1}`, text: it.text.trim(), count: clampCount(it.count) }))
-      return [{ id: `${tp}R${i + 1}`, text: r.text.trim(), count: clampCount(r.count ?? items[0]?.count) }]
+      const days = (n: number | null | undefined) => (n && n > 0 ? Math.max(1, Math.ceil(n - 1e-9)) : null)
+      if (items.length >= 2) return items.map((it, k) => ({ id: `${tp}R${i + 1}.${k + 1}`, text: it.text.trim(), count: clampCount(it.count), daysEach: days(it.days_each ?? r.days_each) }))
+      return [{ id: `${tp}R${i + 1}`, text: r.text.trim(), count: clampCount(r.count ?? items[0]?.count), daysEach: days(r.days_each ?? items[0]?.days_each) }]
     })
     if (!reqs.length) reqs.push({ id: 'R1', text: part.slice(0, 2000) })
     const covered = new Map<string, string[]>() // Anforderung → Kurzbeschreibung der Änderungen
@@ -623,7 +626,7 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
       const checklist = reqs.map((r) => {
         const n = covered.get(r.id)?.length ?? 0
         const want = need.get(r.id) ?? 1
-        return `${isDone(r.id) ? '[erledigt]' : want > 1 ? `[OFFEN – ${n} von ${want} Vorgängen]` : '[OFFEN]'} ${r.id}: ${r.text}${want > 1 ? ` (je ein eigener Vorgang, insgesamt ${want})` : ''}`
+        return `${isDone(r.id) ? '[erledigt]' : want > 1 ? `[OFFEN – ${n} von ${want} Vorgängen]` : '[OFFEN]'} ${r.id}: ${r.text}${want > 1 ? ` (je ein eigener Vorgang, insgesamt ${want})` : ''}${r.daysEach ? ` [je ${r.daysEach} AT]` : ''}`
       }).join('\n')
       const already = opsSoFar.length ? `\n\nBereits umgesetzte Änderungen (NICHT wiederholen, im Plan oben schon enthalten):\n${summarizeOps(opsSoFar)}` : ''
       const earlier = pi > 0 ? `\n\nFrühere Teile der Anweisung sind bereits umgesetzt und im Plan enthalten.` : ''
@@ -644,7 +647,12 @@ export async function* editPlanStream(plan: ExtractedPlan, instruction: string, 
         throw e instanceof HttpError ? new HttpError(e.status, `${prefix}${e.message}`) : e
       }
 
-      const ops = Array.isArray(res.operations) ? res.operations : []
+      const ops = (Array.isArray(res.operations) ? res.operations : []).map((o) => {
+        // „pro Modul 2 Tage“: das Programm setzt die vorgegebene Dauer auf jeden zugehörigen neuen Vorgang
+        const r = reqs.find((x) => x.id === reqOf(o.req))
+        if (r?.daysEach && o.op === 'add' && (o.type ?? 'task') === 'task') return { ...o, duration: r.daysEach, work_hours: null, days_per_week: null }
+        return o
+      })
       const nameBefore = new Map(current.tasks.map((t) => [t.key, t.name]))
       const targetName = (ref: string | null) => (ref ? nameBefore.get(view.aliasToKey.get(ref.trim()) ?? ref.trim()) : undefined)
       const applied = applyPlanOps(current, ops, view.aliasToKey, `ki${pi + 1}r${rounds}_`)
